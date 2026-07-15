@@ -411,13 +411,13 @@ const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(reso
 
 const DISCOVERY_PROVIDER_VERSION = 15;
 const globalDiscovery = globalThis as typeof globalThis & {
-  copydeskDiscoveryProvider?: WalletDiscoveryProvider;
-  copydeskDiscoveryProviderVersion?: number;
+  neraxonDiscoveryProvider?: WalletDiscoveryProvider;
+  neraxonDiscoveryProviderVersion?: number;
 };
 export const getWalletDiscoveryProvider = () => {
-  if (!globalDiscovery.copydeskDiscoveryProvider || globalDiscovery.copydeskDiscoveryProviderVersion !== DISCOVERY_PROVIDER_VERSION) {
-    globalDiscovery.copydeskDiscoveryProvider = new HybridWalletDiscoveryProvider();
-    globalDiscovery.copydeskDiscoveryProviderVersion = DISCOVERY_PROVIDER_VERSION;
+  if (!globalDiscovery.neraxonDiscoveryProvider || globalDiscovery.neraxonDiscoveryProviderVersion !== DISCOVERY_PROVIDER_VERSION) {
+    globalDiscovery.neraxonDiscoveryProvider = new HybridWalletDiscoveryProvider();
+    globalDiscovery.neraxonDiscoveryProviderVersion = DISCOVERY_PROVIDER_VERSION;
   }
-  return globalDiscovery.copydeskDiscoveryProvider;
+  return globalDiscovery.neraxonDiscoveryProvider;
 };

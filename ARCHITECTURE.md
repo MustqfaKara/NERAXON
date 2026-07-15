@@ -1,6 +1,6 @@
 # Mimari
 
-EVM CopyDesk üç ana katmandan oluşur:
+NERAXON üç ana katmandan oluşur:
 
 1. `src/lib/chains`: Ağ bağlantısı, blok izleme, transaction sınıflandırma ve receipt çözümleme.
 2. `src/lib/engine`: Cüzdan skoru, token güvenliği, risk kararı ve paper execution.

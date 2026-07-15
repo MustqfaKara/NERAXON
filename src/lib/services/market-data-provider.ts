@@ -173,13 +173,13 @@ function selectMarketSnapshot(chainId: ChainId, tokenAddress: string, pairs: Dex
 
 const MARKET_PROVIDER_VERSION = 4;
 const globalState = globalThis as typeof globalThis & {
-  copydeskMarketData?: MarketDataProvider;
-  copydeskMarketDataVersion?: number;
+  neraxonMarketData?: MarketDataProvider;
+  neraxonMarketDataVersion?: number;
 };
 export const getMarketDataProvider = () => {
-  if (!globalState.copydeskMarketData || globalState.copydeskMarketDataVersion !== MARKET_PROVIDER_VERSION) {
-    globalState.copydeskMarketData = new DexScreenerMarketDataProvider();
-    globalState.copydeskMarketDataVersion = MARKET_PROVIDER_VERSION;
+  if (!globalState.neraxonMarketData || globalState.neraxonMarketDataVersion !== MARKET_PROVIDER_VERSION) {
+    globalState.neraxonMarketData = new DexScreenerMarketDataProvider();
+    globalState.neraxonMarketDataVersion = MARKET_PROVIDER_VERSION;
   }
-  return globalState.copydeskMarketData!;
+  return globalState.neraxonMarketData!;
 };

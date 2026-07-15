@@ -9,8 +9,8 @@ const labels: Record<string, string> = {
   telegram: "Telegram",
   etherscan: "Etherscan",
 };
-const globalState = globalThis as typeof globalThis & { copydeskHealth?: Map<string, MutableMetric> };
-const metrics = () => (globalState.copydeskHealth ??= new Map());
+const globalState = globalThis as typeof globalThis & { neraxonHealth?: Map<string, MutableMetric> };
+const metrics = () => (globalState.neraxonHealth ??= new Map());
 
 export async function monitorService<T>(id: string, operation: () => Promise<T>, options?: { cacheHit?: boolean }) {
   const startedAt = performance.now();

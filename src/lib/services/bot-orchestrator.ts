@@ -239,15 +239,15 @@ const shortAddress = (value: string) => `${value.slice(0, 6)}…${value.slice(-4
 const OBSERVED_TRANSACTION_TTL_MS = 60 * 60 * 1_000;
 const ORCHESTRATOR_VERSION = 7;
 const globalState = globalThis as typeof globalThis & {
-  copydeskOrchestrator?: BotOrchestrator;
-  copydeskOrchestratorVersion?: number;
-  copydeskObservedTransactions?: Map<string, number>;
+  neraxonOrchestrator?: BotOrchestrator;
+  neraxonOrchestratorVersion?: number;
+  neraxonObservedTransactions?: Map<string, number>;
 };
 
 function claimObservedTransaction(chainId: ChainId, transactionHash: string) {
   const now = Date.now();
   const key = `${chainId}:${transactionHash.toLowerCase()}`;
-  const observed = (globalState.copydeskObservedTransactions ??= new Map());
+  const observed = (globalState.neraxonObservedTransactions ??= new Map());
   const claimedAt = observed.get(key);
   if (claimedAt && now - claimedAt < OBSERVED_TRANSACTION_TTL_MS) return false;
   observed.set(key, now);
@@ -260,8 +260,8 @@ function claimObservedTransaction(chainId: ChainId, transactionHash: string) {
 }
 
 export const getBotOrchestrator = () => {
-  if (!globalState.copydeskOrchestrator || globalState.copydeskOrchestratorVersion !== ORCHESTRATOR_VERSION) {
-    const previous = globalState.copydeskOrchestrator as unknown as {
+  if (!globalState.neraxonOrchestrator || globalState.neraxonOrchestratorVersion !== ORCHESTRATOR_VERSION) {
+    const previous = globalState.neraxonOrchestrator as unknown as {
       dispose?: () => void;
       stopHandlers?: Map<ChainId, () => void>;
     } | undefined;
@@ -271,8 +271,8 @@ export const getBotOrchestrator = () => {
       for (const stop of previous?.stopHandlers?.values() ?? []) stop();
       previous?.stopHandlers?.clear();
     }
-    globalState.copydeskOrchestrator = new BotOrchestrator();
-    globalState.copydeskOrchestratorVersion = ORCHESTRATOR_VERSION;
+    globalState.neraxonOrchestrator = new BotOrchestrator();
+    globalState.neraxonOrchestratorVersion = ORCHESTRATOR_VERSION;
   }
-  return globalState.copydeskOrchestrator;
+  return globalState.neraxonOrchestrator;
 };

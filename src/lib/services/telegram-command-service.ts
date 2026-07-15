@@ -7,7 +7,7 @@ import { monitorService } from "@/lib/services/service-health";
 
 interface TelegramUpdate { update_id: number; message?: TelegramMessage; channel_post?: TelegramMessage }
 interface TelegramMessage { text?: string; chat: { id: number } }
-const globalState = globalThis as typeof globalThis & { copydeskTelegramCommands?: TelegramCommandService };
+const globalState = globalThis as typeof globalThis & { neraxonTelegramCommands?: TelegramCommandService };
 
 class TelegramCommandService {
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -51,6 +51,6 @@ class TelegramCommandService {
 }
 
 export function startTelegramCommandService() {
-  const service = (globalState.copydeskTelegramCommands ??= new TelegramCommandService());
+  const service = (globalState.neraxonTelegramCommands ??= new TelegramCommandService());
   service.start();
 }

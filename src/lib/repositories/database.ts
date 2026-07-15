@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { CHAIN_DEFINITIONS, DEFAULT_RISK_SETTINGS, DEFAULT_STARTING_BALANCE_USD } from "@/lib/domain/defaults";
@@ -10,11 +10,26 @@ export function getDatabase(): DatabaseSync {
 
   const dataDirectory = path.join(process.cwd(), "data");
   mkdirSync(dataDirectory, { recursive: true });
-  database = new DatabaseSync(path.join(dataDirectory, "copydesk.db"));
+  const databasePath = path.join(dataDirectory, "neraxon.db");
+  migrateLegacyDatabase(dataDirectory, databasePath);
+  database = new DatabaseSync(databasePath);
   database.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
   migrate(database);
   seed(database);
   return database;
+}
+
+function migrateLegacyDatabase(dataDirectory: string, databasePath: string) {
+  if (existsSync(databasePath)) return;
+
+  const legacyPath = path.join(dataDirectory, "copydesk.db");
+  if (!existsSync(legacyPath)) return;
+
+  renameSync(legacyPath, databasePath);
+  for (const suffix of ["-wal", "-shm"]) {
+    const legacySidecar = `${legacyPath}${suffix}`;
+    if (existsSync(legacySidecar)) renameSync(legacySidecar, `${databasePath}${suffix}`);
+  }
 }
 
 function migrate(db: DatabaseSync) {

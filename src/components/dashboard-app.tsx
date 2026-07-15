@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
   Activity,
@@ -33,7 +34,6 @@ import {
   UserPlus,
   WalletCards,
   X,
-  Zap,
   BarChart3,
   Layers3,
   History,
@@ -103,7 +103,8 @@ const navigation: Array<{ id: View; label: string; icon: typeof LayoutDashboard 
   { id: "risk", label: "Risk Ayarları", icon: SlidersHorizontal },
 ];
 
-const ACTIVE_VIEW_STORAGE_KEY = "copydesk.activeView";
+const ACTIVE_VIEW_STORAGE_KEY = "neraxon.activeView";
+const LEGACY_ACTIVE_VIEW_STORAGE_KEY = "copydesk.activeView";
 const DASHBOARD_POLL_INTERVAL_MS = 30_000;
 const scrollPageToTop = () => window.scrollTo({ top: 0, left: 0, behavior: "auto" });
 
@@ -151,7 +152,12 @@ export function DashboardApp() {
       () => void refresh({ refreshMarkets: true, showSuccess: false }),
       0,
     );
-    const savedView = window.localStorage.getItem(ACTIVE_VIEW_STORAGE_KEY);
+    const savedView = window.localStorage.getItem(ACTIVE_VIEW_STORAGE_KEY)
+      ?? window.localStorage.getItem(LEGACY_ACTIVE_VIEW_STORAGE_KEY);
+    if (savedView) {
+      window.localStorage.setItem(ACTIVE_VIEW_STORAGE_KEY, savedView);
+      window.localStorage.removeItem(LEGACY_ACTIVE_VIEW_STORAGE_KEY);
+    }
     const viewTimer = navigation.some((item) => item.id === savedView)
       ? window.setTimeout(() => setView(savedView as View), 0)
       : null;
@@ -257,8 +263,8 @@ export function DashboardApp() {
     <div className="app-shell">
       <aside className={`sidebar ${mobileMenu ? "sidebar-open" : ""}`}>
         <div className="brand">
-          <div className="brand-mark"><Zap size={18} strokeWidth={2.4} /></div>
-          <div><strong>CopyDesk</strong><span>EVM çalışma alanı</span></div>
+          <div className="brand-mark"><Image src="/neraxon-icon.png" alt="" width={34} height={34} priority /></div>
+          <div><strong>NERAXON</strong><span>EVM çalışma alanı</span></div>
           <button className="icon-button mobile-close" onClick={() => setMobileMenu(false)} title="Menüyü kapat"><X size={18} /></button>
         </div>
         <nav className="nav-list" aria-label="Ana menü">

@@ -1,10 +1,14 @@
-# Crypto Trading Bot
+<p align="center">
+  <img src="./public/neraxon-icon.png" width="112" alt="NERAXON icon" />
+</p>
 
-Crypto Trading Bot (CopyDesk) is a modular application that monitors successful wallets on Ethereum and Base, copies eligible swaps into a paper portfolio under configurable risk rules, and lets you manage the entire process from a local web dashboard.
+# NERAXON
+
+NERAXON is a modular trading intelligence application that monitors successful wallets on Ethereum and Base, copies eligible swaps into a paper portfolio under configurable risk rules, and lets you manage the entire process from a local web dashboard. Its architecture is ready for an AI-assisted decision layer in V2.
 
 > V1 operates exclusively in paper trading mode. It does not use real funds or private keys.
 
-![CopyDesk overview dashboard](./docs/dashboard.png)
+![NERAXON overview dashboard](./docs/dashboard.png)
 
 ## Features
 
@@ -36,8 +40,8 @@ Crypto Trading Bot (CopyDesk) is a modular application that monitors successful 
 Requirements: Node.js 22+ and npm.
 
 ```bash
-git clone https://github.com/MustqfaKara/Crypto-Trading-Bot.git
-cd Crypto-Trading-Bot
+git clone https://github.com/MustqfaKara/NERAXON.git
+cd NERAXON
 npm install
 cp .env.example .env.local
 npm run dev
