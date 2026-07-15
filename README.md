@@ -1,39 +1,39 @@
 # Crypto Trading Bot
 
-Crypto Trading Bot (CopyDesk), Ethereum ve Base ağlarındaki başarılı cüzdanları izleyen, uygun swap işlemlerini risk kurallarıyla paper ortamında kopyalayan ve bütün süreci yerel bir web panelinden yönetmeyi sağlayan modüler bir uygulamadır.
+Crypto Trading Bot (CopyDesk) is a modular application that monitors successful wallets on Ethereum and Base, copies eligible swaps into a paper portfolio under configurable risk rules, and lets you manage the entire process from a local web dashboard.
 
-> V1 yalnızca paper trading yapar. Gerçek fon veya private key kullanmaz.
+> V1 operates exclusively in paper trading mode. It does not use real funds or private keys.
 
-![CopyDesk genel bakış paneli](./docs/dashboard.png)
+![CopyDesk overview dashboard](./docs/dashboard.png)
 
-## Özellikler
+## Features
 
-- **Cüzdan takibi:** Eklenen EVM cüzdanlarını zincir üzerinde izler; takip duraklatılabilir veya tamamen kaldırılabilir.
-- **Copy trading:** Takip edilen cüzdanların swap işlemlerini çözümler ve uygun işlemleri paper portföye uygular.
-- **Akıllı cüzdan keşfi:** Son 24 saatin yükselen tokenlarını tarar, kârlı cüzdanları bulur ve skorlar.
-- **Çoklu cüzdan sinyali:** Aynı token için 1, 3, 7 ve 15 farklı cüzdan sinyalinde kademeli alım uygular.
-- **Cüzdan bazlı pozisyonlar:** Alım ve satış kararlarını işlemi başlatan kaynak cüzdanla ilişkilendirir.
-- **Risk motoru:** Pozisyon büyüklüğü, likidite, slippage, fiyat etkisi, volatilite ve portföy yoğunluğu sınırlarını uygular.
-- **Gerçekçi paper execution:** DEX ücreti, gas, slippage, fiyat etkisi ve token vergisini simüle eder.
-- **Manuel işlemler:** Kontrat adresinden token bilgilerini getirir; açık pozisyonlardan yüzdesel satış yapılmasını sağlar.
-- **Performans takibi:** Portföy, token, cüzdan ve ağ bazında PnL, maliyet ve kazanma oranlarını gösterir.
-- **Replay:** Kayıtlı işlemleri farklı ücret ve slippage koşullarıyla yeniden değerlendirir.
-- **Telegram bildirimleri:** Swap, kopyalama kararı, hata ve sistem olaylarını ayrıntılı biçimde bildirir.
-- **Sistem sağlığı:** RPC, DexScreener, Telegram ve diğer servislerin gecikme ve hata durumlarını izler.
-- **TR / ENG desteği:** Web paneli, audit kayıtları ve Telegram mesajları iki dili destekler.
-- **Yerel veri saklama:** Ayarlar, işlemler ve portföy SQLite üzerinde yalnızca bilgisayarda tutulur.
+- **Wallet monitoring:** Monitors added EVM wallets on-chain; monitoring can be paused or removed entirely.
+- **Copy trading:** Resolves swaps made by tracked wallets and applies eligible trades to the paper portfolio.
+- **Smart wallet discovery:** Scans the top-performing tokens from the last 24 hours, finds profitable wallets, and scores them.
+- **Multi-wallet signals:** Executes staged buys when 1, 3, 7, and 15 distinct wallets signal the same token.
+- **Wallet-based positions:** Associates every buy and sell decision with the source wallet that initiated the trade.
+- **Risk engine:** Enforces position size, liquidity, slippage, price impact, volatility, and portfolio concentration limits.
+- **Realistic paper execution:** Simulates DEX fees, gas, slippage, price impact, and token taxes.
+- **Manual trading:** Resolves token metadata from a contract address and supports percentage-based sales from open positions.
+- **Performance tracking:** Displays PnL, costs, and win rates by portfolio, token, wallet, and network.
+- **Replay:** Re-evaluates recorded trades under different fee and slippage conditions.
+- **Telegram notifications:** Reports swaps, copy decisions, errors, and system events with detailed context.
+- **System health:** Tracks latency and errors for RPC providers, DexScreener, Telegram, and other services.
+- **TR / ENG support:** Supports both languages across the web dashboard, audit records, and Telegram messages.
+- **Local data storage:** Stores settings, trades, and portfolio data locally in SQLite.
 
-## Teknolojiler
+## Technology Stack
 
-- Next.js 16, React 19 ve TypeScript
-- viem ile EVM bağlantısı
+- Next.js 16, React 19, and TypeScript
+- viem for EVM connectivity
 - SQLite (`node:sqlite`)
-- DexScreener, Alchemy/EVM RPC ve Etherscan API
+- DexScreener, Alchemy/EVM RPC, and Etherscan APIs
 - Telegram Bot API
 
-## Kurulum
+## Installation
 
-Gereksinimler: Node.js 22+ ve npm.
+Requirements: Node.js 22+ and npm.
 
 ```bash
 git clone https://github.com/MustqfaKara/Crypto-Trading-Bot.git
@@ -43,31 +43,31 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Panel: [http://127.0.0.1:3000](http://127.0.0.1:3000)
+Dashboard: [http://127.0.0.1:3000](http://127.0.0.1:3000)
 
-`.env.local` dosyasında Ethereum/Base RPC adreslerini, Telegram bilgilerini ve isteğe bağlı Etherscan anahtarını tanımlayın. Gerçek anahtarları repoya eklemeyin.
+Configure the Ethereum and Base RPC URLs, Telegram credentials, and optional Etherscan API key in `.env.local`. Never commit real credentials to the repository.
 
-## Komutlar
+## Commands
 
 ```bash
-npm run dev        # Yerel geliştirme sunucusu
-npm run build      # Production derlemesi
-npm run typecheck  # TypeScript kontrolü
-npm run lint       # Kod kalitesi kontrolü
-npm test           # Testler
+npm run dev        # Start the local development server
+npm run build      # Create a production build
+npm run typecheck  # Run TypeScript checks
+npm run lint       # Run code quality checks
+npm test           # Run the test suite
 ```
 
-## Mimari
+## Architecture
 
-Proje ağ adaptörleri, işlem/risk motorları, servisler, veri katmanı ve web arayüzü olarak ayrılmıştır. Yeni EVM ağları `ChainAdapter` üzerinden mevcut işlem ve risk mantığını değiştirmeden eklenebilir. Ayrıntılar için [ARCHITECTURE.md](./ARCHITECTURE.md) dosyasına bakın.
+The project is divided into network adapters, trading and risk engines, services, a data layer, and the web interface. Additional EVM networks can be integrated through `ChainAdapter` without changing the existing trading or risk logic. See [ARCHITECTURE.md](./ARCHITECTURE.md) for technical details.
 
-## Yol Haritası
+## Roadmap
 
-- V1: Ethereum ve Base üzerinde paper copy trading
-- V1.x: Yeni EVM ağları ve gelişmiş keşif/indexer desteği
-- V2: MiniMax API ile karar destek katmanı
-- Sistem doğrulandıktan sonra kontrollü live trading altyapısı
+- V1: Paper copy trading on Ethereum and Base
+- V1.x: Additional EVM networks and improved discovery/indexer support
+- V2: A MiniMax API-powered decision support layer
+- Controlled live trading infrastructure after the system has been fully validated
 
-## Uyarı
+## Disclaimer
 
-Bu proje eğitim ve araştırma amaçlıdır; finansal tavsiye değildir. Live trading aşamasına geçmeden önce private key yönetimi, işlem imzalama, limitler ve acil durdurma akışı ayrıca denetlenmelidir.
+This project is intended for educational and research purposes and does not constitute financial advice. Private key management, transaction signing, trading limits, and emergency stop procedures must be independently audited before enabling live trading.
