@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./public/neraxon-icon.png" width="112" alt="NERAXON icon" />
+  <img src="./public/neraxon-symbol-v2.png" width="112" alt="NERAXON symbol" />
 </p>
 
 # NERAXON

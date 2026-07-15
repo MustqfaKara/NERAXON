@@ -263,7 +263,7 @@ export function DashboardApp() {
     <div className="app-shell">
       <aside className={`sidebar ${mobileMenu ? "sidebar-open" : ""}`}>
         <div className="brand">
-          <div className="brand-mark"><Image src="/neraxon-icon.png" alt="" width={34} height={34} priority /></div>
+          <div className="brand-mark"><Image src="/neraxon-symbol-v2.png" alt="" width={34} height={34} priority /></div>
           <div><strong>NERAXON</strong><span>EVM çalışma alanı</span></div>
           <button className="icon-button mobile-close" onClick={() => setMobileMenu(false)} title="Menüyü kapat"><X size={18} /></button>
         </div>

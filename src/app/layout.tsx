@@ -6,8 +6,9 @@ export const metadata: Metadata = {
   title: "NERAXON",
   description: "Yerel EVM işlem otomasyonu ve akıllı cüzdan takip sistemi",
   icons: {
-    icon: "/neraxon-icon.png",
-    apple: "/neraxon-icon.png",
+    icon: [{ url: "/neraxon-symbol-v2.png", type: "image/png" }],
+    shortcut: "/neraxon-symbol-v2.png",
+    apple: "/neraxon-symbol-v2.png",
   },
 };
 
