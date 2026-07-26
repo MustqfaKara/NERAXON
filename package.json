@@ -2,6 +2,15 @@
   "name": "neraxon",
   "version": "2.0.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MustqfaKara/NERAXON.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MustqfaKara/NERAXON/issues"
+  },
+  "homepage": "https://github.com/MustqfaKara/NERAXON#readme",
   "scripts": {
     "dev": "node scripts/dev-runner.mjs",
     "dev:next": "next dev --hostname 127.0.0.1",

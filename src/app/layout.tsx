@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { getInitialLanguage } from "@/lib/server-language";
 
 export const metadata: Metadata = {
   applicationName: "NERAXON",
@@ -12,9 +13,10 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  const language = await getInitialLanguage();
   return (
-    <html lang="tr">
+    <html lang={language}>
       <body>{children}</body>
     </html>
   );

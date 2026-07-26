@@ -5,6 +5,7 @@ import {
   dashboardViewForSlug,
   isDashboardPageSlug,
 } from "@/lib/dashboard-pages";
+import { getInitialLanguage } from "@/lib/server-language";
 
 export const dynamic = "force-dynamic";
 
@@ -19,5 +20,6 @@ export default async function DashboardPage({
 }) {
   const { page } = await params;
   if (!isDashboardPageSlug(page)) notFound();
-  return <DashboardApp key={page} initialView={dashboardViewForSlug(page)} />;
+  const initialLanguage = await getInitialLanguage();
+  return <DashboardApp key={page} initialView={dashboardViewForSlug(page)} initialLanguage={initialLanguage} />;
 }

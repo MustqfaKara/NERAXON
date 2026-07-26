@@ -39,6 +39,7 @@ button { color: inherit; }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 
 .app-shell { min-height: 100vh; }
+.app-shell[data-ui-language="en"][data-translation-ready="false"] { visibility: hidden; }
 .sidebar {
   position: fixed; inset: 0 auto 0 0; z-index: 40; width: 236px;
   display: flex; flex-direction: column; padding: 22px 14px 18px;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useLayoutEffect } from "react";
 import type { AppLanguage } from "@/lib/domain/types";
 import { translateText } from "@/lib/i18n";
 
@@ -51,7 +51,7 @@ function translateElement(element: Element, language: AppLanguage) {
 }
 
 export function useDocumentTranslation(language: AppLanguage) {
-  useEffect(() => {
+  useLayoutEffect(() => {
     const root = document.querySelector(".app-shell");
     if (!root) return;
 
@@ -74,6 +74,8 @@ export function useDocumentTranslation(language: AppLanguage) {
     };
 
     applyTranslation();
+    document.documentElement.lang = language;
+    root.setAttribute("data-translation-ready", "true");
     return () => observer.disconnect();
   }, [language]);
 }

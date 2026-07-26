@@ -1,5 +1,6 @@
 import type { EvmChainId, DiscoveryGainerToken } from "@/lib/domain/types";
 import { monitorService } from "@/lib/services/service-health";
+import { geckoTerminalNetworkForChain } from "@/lib/services/geckoterminal-networks";
 
 export interface IndexedPoolTransfer {
   hash: string;
@@ -26,7 +27,7 @@ export async function scanGeckoPoolTrades(
   chainId: EvmChainId,
   markets: DiscoveryGainerToken[],
 ): Promise<IndexedPoolTransfer[]> {
-  const network = chainId === "base" ? "base" : chainId === "robinhood" ? "robinhood" : null;
+  const network = geckoTerminalNetworkForChain(chainId);
   if (!network) return [];
   const results: IndexedPoolTransfer[] = [];
   for (let index = 0; index < markets.length; index += 2) {
@@ -48,6 +49,7 @@ export async function scanGeckoPoolTrades(
   }
   return results;
 }
+
 
 function toTransfers(market: DiscoveryGainerToken, trades: GeckoTrade[]) {
   const tokenAddress = market.address.toLowerCase();

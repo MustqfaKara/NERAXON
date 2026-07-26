@@ -273,7 +273,9 @@ async function discoverDexScreenerTopGainers(chainId: EvmChainId): Promise<Disco
     .filter((market) => market.priceUsd > 0 && market.priceChange24hPercent > 0 && market.priceChange24hPercent <= 1_000)
     .filter((market) => market.liquidityUsd >= MIN_GAINER_LIQUIDITY_USD)
     .sort((left, right) => right.priceChange24hPercent - left.priceChange24hPercent || right.volume24hUsd - left.volume24hUsd);
-  const geckoMarkets = chainId === "base" ? await discoverGeckoBaseGainers() : [];
+  const geckoMarkets = chainId === "ethereum" || chainId === "base"
+    ? await discoverGeckoGainers(chainId)
+    : [];
   const merged = new Map<string, DiscoveryGainerToken>();
   for (const market of [...dexMarkets, ...geckoMarkets]) {
     const existing = merged.get(market.address);
@@ -284,9 +286,10 @@ async function discoverDexScreenerTopGainers(chainId: EvmChainId): Promise<Disco
     .slice(0, TOP_GAINER_LIMIT);
 }
 
-async function discoverGeckoBaseGainers(): Promise<DiscoveryGainerToken[]> {
+async function discoverGeckoGainers(chainId: "ethereum" | "base"): Promise<DiscoveryGainerToken[]> {
+  const network = chainId === "ethereum" ? "eth" : "base";
   const responses = await Promise.all([1, 2].map((page) => monitorService("geckoterminal", () => fetch(
-    `https://api.geckoterminal.com/api/v2/networks/base/trending_pools?include=base_token&page=${page}&duration=24h`,
+    `https://api.geckoterminal.com/api/v2/networks/${network}/trending_pools?include=base_token&page=${page}&duration=24h`,
     { signal: AbortSignal.timeout(15_000), headers: { accept: "application/json" }, cache: "no-store" },
   ))));
   const payloads = await Promise.all(responses.filter((response) => response.ok).map((response) => response.json() as Promise<{
@@ -311,7 +314,7 @@ async function discoverGeckoBaseGainers(): Promise<DiscoveryGainerToken[]> {
       const token = tokens.get(pool.relationships?.base_token?.data?.id);
       const address = token?.address?.toLowerCase();
       const attributes = pool.attributes;
-      if (!address || !attributes || isQuoteToken("base", address) || address === getWrappedNativeAddress("base")) return [];
+      if (!address || !attributes || isQuoteToken(chainId, address) || address === getWrappedNativeAddress(chainId)) return [];
       return [{
         address,
         symbol: token?.symbol ?? "TOKEN",
@@ -565,7 +568,7 @@ const sum = (values: number[]) => values.reduce((total, value) => total + value,
 const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const inversePriceChange = (percent: number) => percent <= -99.99 ? 10_000 : (1 / (1 + percent / 100) - 1) * 100;
 
-const DISCOVERY_PROVIDER_VERSION = 45;
+const DISCOVERY_PROVIDER_VERSION = 46;
 const globalDiscovery = globalThis as typeof globalThis & {
   neraxonDiscoveryProvider?: WalletDiscoveryProvider;
   neraxonDiscoveryProviderVersion?: number;

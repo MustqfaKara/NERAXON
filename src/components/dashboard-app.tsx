@@ -127,10 +127,10 @@ const navigation: Array<{ id: View; label: string; icon: typeof LayoutDashboard 
 const DASHBOARD_POLL_INTERVAL_MS = 60_000;
 const scrollPageToTop = () => window.scrollTo({ top: 0, left: 0, behavior: "auto" });
 
-export function DashboardApp({ initialView }: { initialView: View }) {
+export function DashboardApp({ initialView, initialLanguage }: { initialView: View; initialLanguage: AppLanguage }) {
   const router = useRouter();
   const [data, setData] = useState<DashboardSnapshot | null>(null);
-  const [language, setLanguage] = useState<AppLanguage>("tr");
+  const [language, setLanguage] = useState<AppLanguage>(initialLanguage);
   const [view, setView] = useState<View>(initialView);
   const [mobileMenu, setMobileMenu] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -334,7 +334,11 @@ export function DashboardApp({ initialView }: { initialView: View }) {
   const allRunning = controllableChains.length > 0 && controllableChains.every((chain) => chain.status === "running");
 
   return (
-    <div className="app-shell">
+    <div
+      className="app-shell"
+      data-ui-language={language}
+      data-translation-ready={language === "tr" ? "true" : "false"}
+    >
       <aside className={`sidebar ${mobileMenu ? "sidebar-open" : ""}`}>
         <div className="brand">
           <div className="brand-mark"><Image src="/neraxon-symbol-v2.png" alt="" width={34} height={34} priority /></div>

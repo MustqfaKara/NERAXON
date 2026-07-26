@@ -103,6 +103,14 @@ Both `npm run dev` and `npm start` bind only to `127.0.0.1`.
 
 Chain and venue adapters, deterministic risk engines, execution services, credential custody, persistence, and the Next.js interface are kept separate so new integrations can be added without changing existing execution semantics. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the technical flow.
 
+## Contributing
+
+Contributions are welcome. Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening an issue or pull request. Report vulnerabilities privately according to [SECURITY.md](./SECURITY.md).
+
+## License
+
+NERAXON is open-source software licensed under the [MIT License](./LICENSE).
+
 ## Disclaimer
 
 NERAXON can submit real financial transactions and can lose funds through market movement, smart-contract behavior, provider failure, configuration errors, or compromised credentials. Review the code and operating environment independently before using live execution.
