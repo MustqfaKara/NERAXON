@@ -25,7 +25,7 @@ export async function POST(
       throw new Error(`${chainId} ilk shadow test kapsamına dahil değil. Yalnızca Base, Solana ve Hyperliquid çalıştırılabilir.`);
     }
     if (action === "start" && mode === "live" && !isLivePilotIntegration(chainId)) {
-      throw new Error(`${chainId} ilk canlı pilot kapsamına dahil değil. Yalnızca Base, Robinhood, Solana ve Hyperliquid çalıştırılabilir.`);
+      throw new Error(`${chainId} canlı işlem kapsamına dahil değil.`);
     }
     const orchestrator = getBotOrchestrator();
     const chain = action === "start" ? await orchestrator.start(chainId) : await orchestrator.stop(chainId);

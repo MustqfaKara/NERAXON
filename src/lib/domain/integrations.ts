@@ -20,7 +20,7 @@ export const INTEGRATION_CATALOG: Record<ChainId, IntegrationMetadata> = {
 
 export const INTEGRATION_IDS = Object.keys(INTEGRATION_CATALOG) as ChainId[];
 export const SHADOW_TEST_INTEGRATION_IDS = ["base", "solana", "hyperliquid"] as const satisfies readonly ChainId[];
-export const LIVE_PILOT_INTEGRATION_IDS = ["base", "robinhood", "solana", "hyperliquid"] as const satisfies readonly ChainId[];
+export const LIVE_PILOT_INTEGRATION_IDS = ["ethereum", "base", "robinhood", "solana", "hyperliquid"] as const satisfies readonly ChainId[];
 export const SHADOW_TEST_BALANCE_USD = 33.33;
 export const isShadowTestIntegration = (id: ChainId) => SHADOW_TEST_INTEGRATION_IDS.some((testId) => testId === id);
 export const isLivePilotIntegration = (id: ChainId) => LIVE_PILOT_INTEGRATION_IDS.some((pilotId) => pilotId === id);

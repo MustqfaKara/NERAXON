@@ -4,11 +4,21 @@
 
 # NERAXON
 
-NERAXON is a local-first copy-trading and market intelligence workspace for Ethereum, Base, Robinhood Chain, Solana, and Hyperliquid. It discovers active wallets, follows their network-specific activity, evaluates copy signals, manages live positions, and records every decision in a focused dashboard.
+NERAXON is a local-first copy-trading and market intelligence workspace for Ethereum, Base, Robinhood Chain, Solana, and Hyperliquid. All five integrations participate in the live monitoring, portfolio, readiness, certification, reconciliation, and copy-trading workflow.
 
 > NERAXON is intentionally designed to run on the operator's own Mac. Do not expose its dashboard or API port to the public internet.
 
-![NERAXON overview dashboard](./docs/dashboard.png)
+![NERAXON multi-network wallet discovery](./docs/dashboard.png)
+
+## Supported Integrations
+
+| Integration | Monitoring and discovery | Execution |
+| --- | --- | --- |
+| Ethereum | EVM swaps and network-scoped wallets | 0x |
+| Base | EVM swaps and network-scoped wallets | 0x |
+| Robinhood Chain | EVM swaps and network-scoped wallets | Uniswap v4 |
+| Solana | Spot swaps across supported DEX activity | Jupiter |
+| Hyperliquid | HyperCore spot and perpetual fills | Hyperliquid Exchange API |
 
 ## Features
 

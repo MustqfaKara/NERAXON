@@ -1,4 +1,9 @@
 export const extraEnglishPhrases: Array<[string, string]> = [
+  ["Gerçek fonlarla işlem yapılıyor", "Real funds are in use"],
+  ["Şifreli kasa koruması", "Encrypted vault protection"],
+  ["Bu sayfanın verilerini yenile", "Refresh this page"],
+  ["API gecikmesi", "API latency"],
+  ["Entegrasyonlar", "Integrations"],
   ["RPC Ayarları", "RPC Settings"],
   ["Bağlantı altyapısı", "Connection infrastructure"],
   ["EVM ağlarının ana ve yedek RPC sırası, güncel sağlık bilgisi ve istek aralıkları.", "Primary and fallback RPC order, current health, and request intervals for EVM networks."],
