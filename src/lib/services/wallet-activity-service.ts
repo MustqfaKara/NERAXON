@@ -4,7 +4,7 @@ import { publishEvent } from "@/lib/services/audit-service";
 export async function enforceWalletActivityLimits() {
   const pausedWallets = store.pauseOveractiveWallets();
   await Promise.all(pausedWallets.map((wallet) => publishEvent({
-    chainId: null,
+    chainId: wallet.chainId,
     level: "warning",
     type: "system",
     title: "Yoğun işlem yapan cüzdan duraklatıldı",

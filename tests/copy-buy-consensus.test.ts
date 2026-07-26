@@ -12,6 +12,10 @@ test("ikinci alımı üçüncü farklı cüzdan tetikler", () => {
 });
 
 test("aynı cüzdan tekrar sayılmaz ve bekleyen aşama çift alımı engeller", () => {
-  assert.equal(canTriggerNextBuy({ completedBuyStages: 1, distinctWalletCount: 3, isNewWallet: false, hasPendingStage: false }).shouldCopy, false);
-  assert.equal(canTriggerNextBuy({ completedBuyStages: 1, distinctWalletCount: 4, isNewWallet: true, hasPendingStage: true }).shouldCopy, false);
+  const duplicate = canTriggerNextBuy({ completedBuyStages: 1, distinctWalletCount: 3, isNewWallet: false, hasPendingStage: false });
+  const pending = canTriggerNextBuy({ completedBuyStages: 1, distinctWalletCount: 4, isNewWallet: true, hasPendingStage: true });
+  assert.equal(duplicate.shouldCopy, false);
+  assert.equal(duplicate.reason, "duplicate_wallet");
+  assert.equal(pending.shouldCopy, false);
+  assert.equal(pending.reason, "stage_pending");
 });

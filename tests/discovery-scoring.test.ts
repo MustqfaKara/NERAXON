@@ -10,5 +10,11 @@ test("aktif ve çeşitli swap cüzdanını daha yüksek puanlar", () => {
 
 test("keşif skoru yüz puanı aşmaz", () => {
   const result = calculateDiscoveryScore({ swapCount: 100, buyCount: 50, sellCount: 50, uniqueTokenCount: 100, ageMinutes: 0, estimatedPnlPercent: 100 });
-  assert.equal(result.score, 100);
+  assert.ok(result.score <= 100);
+});
+
+test("ölçülü işlem yapan cüzdanı aşırı aktif cüzdandan daha yüksek puanlar", () => {
+  const measured = calculateDiscoveryScore({ swapCount: 14, buyCount: 8, sellCount: 6, uniqueTokenCount: 3, ageMinutes: 20, estimatedPnlPercent: 45, boughtUsd: 3_000, estimatedPnlUsd: 1_350 });
+  const excessive = calculateDiscoveryScore({ swapCount: 100, buyCount: 52, sellCount: 48, uniqueTokenCount: 12, ageMinutes: 20, estimatedPnlPercent: 45, boughtUsd: 3_000, estimatedPnlUsd: 1_350 });
+  assert.ok(measured.score > excessive.score);
 });

@@ -1,4 +1,5 @@
-import type { AuditEvent, ChainRuntime, Position, PositionLot, Trade, TrackedWallet } from "@/lib/domain/types";
+import type { AuditEvent, ChainRuntime, HypercorePaperPosition, HypercorePaperTrade, Position, PositionLot, Trade, TrackedWallet } from "@/lib/domain/types";
+import { parseTrackedChainIds } from "@/lib/engine/wallet-network-scope";
 
 type Row = Record<string, unknown>;
 
@@ -6,6 +7,7 @@ export const mapChain = (row: Row): ChainRuntime => ({
   id: row.id as ChainRuntime["id"],
   name: row.name as string,
   nativeSymbol: row.native_symbol as string,
+  kind: (row.kind ?? "evm") as ChainRuntime["kind"],
   status: row.status as ChainRuntime["status"],
   rpcConfigured: Boolean(row.rpc_configured),
   lastBlock: row.last_block as number | null,
@@ -14,10 +16,54 @@ export const mapChain = (row: Row): ChainRuntime => ({
   updatedAt: row.updated_at as string,
 });
 
+export const mapHypercorePosition = (row: Row): HypercorePaperPosition => ({
+  id: row.id as string,
+  walletId: row.wallet_id as string | null,
+  walletLabel: row.wallet_label as string | null,
+  coin: row.coin as string,
+  marketType: row.market_type as HypercorePaperPosition["marketType"],
+  side: row.side as HypercorePaperPosition["side"],
+  quantity: Number(row.quantity),
+  entryPriceUsd: Number(row.entry_price_usd),
+  currentPriceUsd: Number(row.current_price_usd),
+  marginUsd: Number(row.margin_usd),
+  leverage: Number(row.leverage),
+  liquidationPriceUsd: row.liquidation_price_usd === null ? null : Number(row.liquidation_price_usd),
+  unrealizedPnlUsd: Number(row.unrealized_pnl_usd),
+  fundingUsd: Number(row.funding_usd),
+  openedAt: row.opened_at as string,
+  updatedAt: row.updated_at as string,
+});
+
+export const mapHypercoreTrade = (row: Row): HypercorePaperTrade => ({
+  id: row.id as string,
+  walletId: row.wallet_id as string | null,
+  source: row.source as HypercorePaperTrade["source"],
+  coin: row.coin as string,
+  marketType: row.market_type as HypercorePaperTrade["marketType"],
+  side: row.side as HypercorePaperTrade["side"],
+  positionSide: row.position_side as HypercorePaperTrade["positionSide"],
+  action: row.action as HypercorePaperTrade["action"],
+  quantity: Number(row.quantity),
+  priceUsd: Number(row.price_usd),
+  notionalUsd: Number(row.notional_usd),
+  marginUsd: Number(row.margin_usd),
+  leverage: Number(row.leverage),
+  feeUsd: Number(row.fee_usd),
+  fundingUsd: Number(row.funding_usd),
+  realizedPnlUsd: Number(row.realized_pnl_usd),
+  status: row.status as HypercorePaperTrade["status"],
+  reason: row.reason as string,
+  sourceFillId: row.source_fill_id as string | null,
+  createdAt: row.created_at as string,
+});
+
 export const mapWallet = (row: Row): TrackedWallet => ({
   id: row.id as string,
   address: row.address as string,
   label: row.label as string,
+  isFavorite: Boolean(row.is_favorite),
+  trackedChainIds: parseTrackedChainIds(row.tracked_chain_ids),
   state: row.state as TrackedWallet["state"],
   score: row.score as number,
   scoreBreakdown: JSON.parse(row.score_breakdown as string),
@@ -26,6 +72,8 @@ export const mapWallet = (row: Row): TrackedWallet => ({
   copiedTradeCount: Number(row.copied_trade_count ?? 0),
   winRate: row.win_rate as number,
   realizedPnlUsd: row.realized_pnl_usd as number,
+  copyPnlPercent: 0,
+  copyInvestedUsd: 0,
   maxDrawdownPercent: row.max_drawdown_percent as number,
   averageHoldMinutes: row.average_hold_minutes as number,
   pauseReason: row.pause_reason as string | null,

@@ -1,4 +1,4 @@
-import type { ChainId } from "@/lib/domain/types";
+import type { ChainId, HypercoreFillObservation } from "@/lib/domain/types";
 
 export interface ChainHealth {
   blockNumber: number;
@@ -12,6 +12,23 @@ export interface ObservedTransaction {
   input: string;
   blockNumber: number;
   value: bigint;
+  hypercoreFill?: HypercoreFillObservation;
+  solanaTransaction?: SolanaTransactionObservation;
+}
+
+export interface SolanaTokenBalanceChange {
+  mint: string;
+  owner: string;
+  decimals: number;
+  amount: number;
+}
+
+export interface SolanaTransactionObservation {
+  signature: string;
+  slot: number;
+  feeLamports: number;
+  nativeChangeLamports: number;
+  tokenChanges: SolanaTokenBalanceChange[];
 }
 
 export interface TransactionTokenMovement {
@@ -40,6 +57,11 @@ export interface SwapObservation {
   sourceAmount: number | null;
 }
 
+export interface ChainWatchOptions {
+  resumeFromCursor?: number | null;
+  onCursor?: (cursor: number) => void;
+}
+
 export interface ChainAdapter {
   readonly id: ChainId;
   checkHealth(): Promise<ChainHealth>;
@@ -50,5 +72,6 @@ export interface ChainAdapter {
     onTransactions: (transactions: ObservedTransaction[]) => Promise<void>,
     trackedAddresses: () => Set<string>,
     onError: (error: Error) => Promise<void>,
+    options?: ChainWatchOptions,
   ): () => void;
 }

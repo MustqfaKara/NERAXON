@@ -11,18 +11,21 @@ export interface PaperExecutionInput {
   priceChange24hPercent: number;
   executionDelayMs: number;
   gasFeeUsd: number;
+  routePriceImpactPercent?: number;
+  routeDexFeePercent?: number;
 }
 
 export function modelPaperExecution(input: PaperExecutionInput) {
   const delayMinutes = Math.max(0, input.executionDelayMs) / 60_000;
   const minuteVolatility = Math.abs(input.priceChange24hPercent) / (24 * 60);
   const delayImpactPercent = Math.min(1.5, minuteVolatility * delayMinutes * 0.35);
-  const priceImpactPercent = Math.min(20, (input.grossUsd / Math.max(1, input.liquidityUsd)) * 100);
-  const adversePercent = delayImpactPercent + (priceImpactPercent * 0.5);
+  const priceImpactPercent = input.routePriceImpactPercent ?? Math.min(20, (input.grossUsd / Math.max(1, input.liquidityUsd)) * 100);
+  const slippagePercent = Math.max(0, input.slippagePercent);
+  const adversePercent = delayImpactPercent + priceImpactPercent + slippagePercent;
   const priceMultiplier = input.side === "buy" ? 1 + adversePercent / 100 : 1 - adversePercent / 100;
   const fillPriceUsd = Math.max(Number.EPSILON, input.quotedPriceUsd * priceMultiplier);
-  const dexFeeUsd = input.grossUsd * (Math.max(0, input.dexFeePercent) / 100);
-  const slippageUsd = input.grossUsd * (Math.max(0, input.slippagePercent) / 100);
+  const dexFeeUsd = input.grossUsd * (Math.max(0, input.routeDexFeePercent ?? input.dexFeePercent) / 100);
+  const slippageUsd = input.grossUsd * (slippagePercent / 100);
   const priceImpactUsd = input.grossUsd * (priceImpactPercent / 100);
   const tokenTaxUsd = input.grossUsd * (Math.max(0, input.tokenTaxPercent) / 100);
   const totalUsd = dexFeeUsd + input.gasFeeUsd + slippageUsd + priceImpactUsd + tokenTaxUsd;
@@ -32,6 +35,10 @@ export function modelPaperExecution(input: PaperExecutionInput) {
     priceImpactPercent,
     fees: { dexFeeUsd, gasFeeUsd: input.gasFeeUsd, slippageUsd, priceImpactUsd, tokenTaxUsd, totalUsd },
   };
+}
+
+export function explicitExecutionFees(fees: ReturnType<typeof modelPaperExecution>["fees"]) {
+  return fees.dexFeeUsd + fees.gasFeeUsd + fees.tokenTaxUsd;
 }
 
 export function dexFeePercentFor(dexId?: string) {

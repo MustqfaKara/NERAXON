@@ -16,6 +16,8 @@ const KNOWN_SWAP_ROUTERS = new Set([
   "0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45",
   "0x3fc91a3afd70395cd496c647d5a6cc9d4b2fadad",
   "0x198ef79f1f515f02dfe9e3115ed9fc07183f02fc",
+  "0xc8f6b8ba0dc0f175b568b99440b0867f69a29265",
+  "0x7251febeabb01ec9de53ece7a96f1c951f886dd2",
 ]);
 
 interface InspectionContext {

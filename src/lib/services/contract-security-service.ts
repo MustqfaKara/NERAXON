@@ -1,6 +1,7 @@
 import type { Address } from "viem";
-import type { ChainId } from "@/lib/domain/types";
+import type { EvmChainId } from "@/lib/domain/types";
 import type { TokenSafetyResult } from "@/lib/engine/token-security";
+export { mergeTokenSafety } from "@/lib/engine/token-safety-merge";
 import { getPublicClient } from "@/lib/chains/public-client";
 
 const OWNER_ABI = [{ type: "function", name: "owner", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] }] as const;
@@ -8,7 +9,7 @@ const PAUSED_ABI = [{ type: "function", name: "paused", stateMutability: "view",
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const IMPLEMENTATION_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc" as const;
 
-export async function inspectContractSecurity(chainId: ChainId, address: Address): Promise<Pick<TokenSafetyResult, "approved" | "warnings" | "checks">> {
+export async function inspectContractSecurity(chainId: EvmChainId, address: Address): Promise<Pick<TokenSafetyResult, "approved" | "warnings" | "checks">> {
   const client = getPublicClient(chainId);
   const checks: TokenSafetyResult["checks"] = [];
   const warnings: string[] = [];
@@ -32,12 +33,4 @@ export async function inspectContractSecurity(chainId: ChainId, address: Address
   checks.push({ label: "Proxy yapısı", status: isProxy ? "warning" : "passed", detail: isProxy ? "Yükseltilebilir proxy işareti bulundu." : "EIP-1967 implementation işareti bulunmadı." });
   if (isProxy) warnings.push("Kontrat yükseltilebilir proxy kullanıyor.");
   return { approved: true, warnings, checks };
-}
-
-export function mergeTokenSafety(base: TokenSafetyResult, contract: Awaited<ReturnType<typeof inspectContractSecurity>>): TokenSafetyResult {
-  const warnings = [...base.warnings, ...contract.warnings];
-  const checks = [...base.checks, ...contract.checks];
-  const approved = base.approved && contract.approved;
-  const score = approved ? Math.max(0, 100 - warnings.length * 10 - checks.filter((check) => check.status === "warning").length * 4) : 0;
-  return { approved, warnings, checks, score, reason: approved ? warnings.join(" ") || "Piyasa ve kontrat kontrolleri geçti." : warnings.join(" ") || "Kontrat güvenlik kontrolü reddedildi." };
 }

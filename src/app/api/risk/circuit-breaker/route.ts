@@ -5,11 +5,13 @@ import { getBotOrchestrator } from "@/lib/services/bot-orchestrator";
 import { store } from "@/lib/repositories/store";
 import { publishEvent } from "@/lib/services/audit-service";
 import { apiError } from "@/lib/utils/api";
+import { assertSameOrigin } from "@/lib/security/same-origin";
 
 const schema = z.object({ action: z.enum(["halt", "reset"]) });
 
 export async function POST(request: Request) {
   try {
+    assertSameOrigin(request);
     const { action } = schema.parse(await request.json());
     const state = action === "halt" ? haltTrading("Web panelinden acil durdurma etkinleştirildi.") : resetCircuitBreaker();
     if (action === "halt") {

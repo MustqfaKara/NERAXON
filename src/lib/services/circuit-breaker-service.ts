@@ -29,6 +29,11 @@ export function resetCircuitBreaker() {
   return save({ halted: false, reason: null, consecutiveFailures: 0, triggeredAt: null, updatedAt: new Date().toISOString() });
 }
 
+export function isRecoverableOperationalHalt(state: CircuitBreakerState) {
+  if (!state.halted || !state.reason) return false;
+  return /fetch failed|HTTP request failed|RPC|WebSocket|timeout|zaman aşımı|gecikmesi/i.test(state.reason);
+}
+
 function save(state: CircuitBreakerState) {
   const next = { ...state, updatedAt: new Date().toISOString() };
   store.setCircuitBreaker(next);

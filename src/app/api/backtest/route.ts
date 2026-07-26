@@ -2,11 +2,13 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { store } from "@/lib/repositories/store";
 import { apiError } from "@/lib/utils/api";
+import { assertSameOrigin } from "@/lib/security/same-origin";
 
 const schema = z.object({ feeMultiplier: z.number().min(0).max(5).default(1), slippageMultiplier: z.number().min(0).max(5).default(1), startingBalanceUsd: z.number().min(10).max(1_000_000).default(100) });
 
 export async function POST(request: Request) {
   try {
+    assertSameOrigin(request);
     const input = schema.parse(await request.json());
     const history = [...store.listTrades()].reverse().filter((trade) => trade.status === "confirmed");
     let equity = input.startingBalanceUsd;

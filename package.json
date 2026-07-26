@@ -1,20 +1,27 @@
 {
   "name": "neraxon",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --hostname 127.0.0.1",
+    "dev": "node scripts/dev-runner.mjs",
+    "dev:next": "next dev --hostname 127.0.0.1",
     "build": "next build",
     "start": "next start --hostname 127.0.0.1",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "node --no-warnings --test --experimental-strip-types tests/*.test.ts"
+    "test": "node --no-warnings --test --experimental-strip-types tests/*.test.ts",
+    "telegram:login": "node scripts/telegram-user-auth.mjs",
+    "telegram:check": "node scripts/telegram-user-auth.mjs --check"
   },
   "dependencies": {
+    "@nktkas/hyperliquid": "^0.32.2",
+    "@solana/web3.js": "^1.98.4",
+    "bs58": "^6.0.0",
     "lucide-react": "^0.468.0",
-    "next": "^16.1.5",
+    "next": "^16.2.11",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "teleproto": "^1.228.4",
     "viem": "^2.44.0",
     "zod": "^4.3.5"
   },

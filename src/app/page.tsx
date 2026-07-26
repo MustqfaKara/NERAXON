@@ -1,7 +1,7 @@
-import { DashboardApp } from "@/components/dashboard-app";
+import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
 export default function Home() {
-  return <DashboardApp />;
+  redirect("/overview");
 }

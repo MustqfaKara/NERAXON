@@ -4,7 +4,7 @@ import { resolveTokenQuote } from "@/lib/services/token-quote-service";
 import { apiError } from "@/lib/utils/api";
 
 const schema = z.object({
-  chainId: z.enum(["ethereum", "base"]),
+  chainId: z.enum(["ethereum", "base", "robinhood", "solana"]),
   address: z.string().trim(),
 });
 

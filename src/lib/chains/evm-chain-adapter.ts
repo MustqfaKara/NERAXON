@@ -1,42 +1,46 @@
 import { formatUnits, type Hash, type TransactionReceipt } from "viem";
-import type { ChainId } from "@/lib/domain/types";
-import type { ChainAdapter, ChainHealth, ObservedTransaction, SwapObservation, TransactionInspection } from "@/lib/chains/chain-adapter";
+import type { EvmChainId } from "@/lib/domain/types";
+import type { ChainAdapter, ChainHealth, ChainWatchOptions, ObservedTransaction, SwapObservation, TransactionInspection } from "@/lib/chains/chain-adapter";
 import { getPublicClient } from "@/lib/chains/public-client";
-import { isQuoteToken } from "@/lib/chains/token-config";
-import { CHAIN_DEFINITIONS } from "@/lib/domain/defaults";
+import { getQuoteTokenKind, isQuoteToken } from "@/lib/chains/token-config";
+import { parseErc20TransferAmount } from "@/lib/chains/evm-log";
+import { getEvmReplayBatchSize, splitEvmReplayRange } from "@/lib/chains/evm-replay";
+import { evmPollingIntervalMs, fetchEvmRpcJson } from "@/lib/chains/evm-rpc-pool";
 
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const MAX_REPLAY_BLOCKS = 20_000;
 const ERC20_METADATA_ABI = [
   { type: "function", name: "symbol", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
   { type: "function", name: "decimals", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] },
 ] as const;
 
 export class EvmChainAdapter implements ChainAdapter {
-  readonly id: ChainId;
+  readonly id: EvmChainId;
   private readonly client;
   private readonly receiptCache = new Map<string, { expiresAt: number; value: Promise<TransactionReceipt> }>();
+  private lastHealth: ChainHealth | null = null;
+  private lastHealthCheckedAt = 0;
 
-  constructor(id: ChainId) {
+  constructor(id: EvmChainId) {
     this.id = id;
     this.client = getPublicClient(id);
   }
 
   async checkHealth(): Promise<ChainHealth> {
     const startedAt = performance.now();
-    const response = await fetch(CHAIN_DEFINITIONS[this.id].rpcUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }),
-      signal: AbortSignal.timeout(10_000),
-      cache: "no-store",
-    });
-    if (!response.ok) throw new Error(`RPC sağlık kontrolü başarısız (${response.status}).`);
-    const payload = await response.json() as { result?: string; error?: { message?: string } };
+    const payload = await fetchEvmRpcJson<{ result?: string; error?: { message?: string } }>(
+      this.id,
+      { jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] },
+      10_000,
+    );
     if (!payload.result) throw new Error(payload.error?.message ?? "RPC blok numarası döndürmedi.");
-    return {
+    const health = {
       blockNumber: Number(BigInt(payload.result)),
       latencyMs: Math.max(1, Math.round(performance.now() - startedAt)),
     };
+    this.lastHealth = health;
+    this.lastHealthCheckedAt = Date.now();
+    return health;
   }
 
   async analyzeSwap(transaction: ObservedTransaction): Promise<SwapObservation | null> {
@@ -49,7 +53,7 @@ export class EvmChainAdapter implements ChainAdapter {
       if (log.topics[0]?.toLowerCase() !== TRANSFER_TOPIC || log.topics.length < 3) continue;
       const from = topicAddress(log.topics[1]);
       const to = topicAddress(log.topics[2]);
-      const amount = BigInt(log.data || "0x0");
+      const amount = parseErc20TransferAmount(log.data);
       const tokenAddress = log.address.toLowerCase();
       if (to === walletAddress) incoming.set(tokenAddress, (incoming.get(tokenAddress) ?? 0n) + amount);
       if (from === walletAddress) outgoing.set(tokenAddress, (outgoing.get(tokenAddress) ?? 0n) + amount);
@@ -57,12 +61,15 @@ export class EvmChainAdapter implements ChainAdapter {
 
     const incomingTarget = [...incoming.entries()].find(([address]) => !isQuoteToken(this.id, address));
     const outgoingTarget = [...outgoing.entries()].find(([address]) => !isQuoteToken(this.id, address));
-    const side = incomingTarget ? "buy" : outgoingTarget ? "sell" : null;
-    const target = incomingTarget ?? outgoingTarget;
+    const incomingStable = [...incoming.entries()].find(([address]) => getQuoteTokenKind(this.id, address) === "stable");
+    const outgoingStable = [...outgoing.entries()].find(([address]) => getQuoteTokenKind(this.id, address) === "stable");
+    const side = incomingTarget ? "buy" : outgoingTarget ? "sell" : incomingStable ? "buy" : outgoingStable ? "sell" : null;
+    const target = incomingTarget ?? outgoingTarget ?? incomingStable ?? outgoingStable;
     if (!side || !target) return null;
 
     const [tokenAddress, rawAmount] = target;
-    const metadata = await this.getTokenMetadata(tokenAddress);
+    const metadata = await this.getTokenMetadata(tokenAddress).catch(() => null);
+    if (!metadata) return null;
     const quoteMovement = side === "buy"
       ? [...outgoing.entries()].find(([address]) => isQuoteToken(this.id, address))
       : [...incoming.entries()].find(([address]) => isQuoteToken(this.id, address));
@@ -94,7 +101,7 @@ export class EvmChainAdapter implements ChainAdapter {
       const tokenAddress = log.address.toLowerCase();
       const key = `${tokenAddress}:${direction}`;
       const current = rawMovements.get(key);
-      rawMovements.set(key, { tokenAddress, direction, amount: (current?.amount ?? 0n) + BigInt(log.data || "0x0") });
+      rawMovements.set(key, { tokenAddress, direction, amount: (current?.amount ?? 0n) + parseErc20TransferAmount(log.data) });
     }
     const tokenMovements = (await Promise.all([...rawMovements.values()].map(async (movement) => {
       try {
@@ -133,37 +140,76 @@ export class EvmChainAdapter implements ChainAdapter {
     onTransactions: (transactions: ObservedTransaction[]) => Promise<void>,
     trackedAddresses: () => Set<string>,
     onError: (error: Error) => Promise<void>,
+    options: ChainWatchOptions = {},
   ) {
-    let lastBlock: bigint | null = null;
+    let lastBlock = options.resumeFromCursor === null || options.resumeFromCursor === undefined
+      ? null
+      : BigInt(options.resumeFromCursor);
+    let processing = Promise.resolve();
     return this.client.watchBlockNumber({
       emitOnBegin: true,
-      pollingInterval: this.id === "base" ? 3_000 : 12_000,
+      pollingInterval: evmPollingIntervalMs(this.id),
       onBlockNumber: async (blockNumber) => {
-        if (lastBlock === blockNumber) return;
-        lastBlock = blockNumber;
-        const health = await this.checkHealth();
-        await onBlock(health);
-
-        const addresses = trackedAddresses();
-        if (addresses.size === 0) return;
-        const block = await this.client.getBlock({ blockNumber, includeTransactions: true });
-        const matches: ObservedTransaction[] = [];
-        for (const transaction of block.transactions) {
-          if (typeof transaction === "string") continue;
-          if (!addresses.has(transaction.from.toLowerCase())) continue;
-          matches.push({
-            hash: transaction.hash as Hash,
-            from: transaction.from.toLowerCase(),
-            to: transaction.to?.toLowerCase() ?? null,
-            input: transaction.input,
-            blockNumber: Number(blockNumber),
-            value: transaction.value,
-          });
-        }
-        if (matches.length) await onTransactions(matches);
+        processing = processing.then(async () => {
+          if (lastBlock !== null && blockNumber <= lastBlock) return;
+          const start = lastBlock === null
+            ? blockNumber
+            : blockNumber - lastBlock > BigInt(MAX_REPLAY_BLOCKS)
+              ? blockNumber - BigInt(MAX_REPLAY_BLOCKS) + 1n
+              : lastBlock + 1n;
+          const health = Date.now() - this.lastHealthCheckedAt >= 60_000
+            ? await this.checkHealth()
+            : { blockNumber: Number(blockNumber), latencyMs: this.lastHealth?.latencyMs ?? 1 };
+          await onBlock({ ...health, blockNumber: Number(blockNumber) });
+          const replayBatchSize = getEvmReplayBatchSize(this.id);
+          for (const range of splitEvmReplayRange(start, blockNumber, replayBatchSize)) {
+            const { fromBlock: cursor, toBlock: end } = range;
+            const addresses = trackedAddresses();
+            const matches = addresses.size
+              ? await this.getTrackedTransactions(cursor, end, addresses)
+              : [];
+            if (matches.length) await onTransactions(matches);
+            lastBlock = end;
+            options.onCursor?.(Number(end));
+            if ((this.id === "base" || this.id === "robinhood") && end < blockNumber) {
+              await new Promise((resolve) => setTimeout(resolve, this.id === "base" ? 75 : 125));
+            }
+          }
+        }).catch((error) => onError(error instanceof Error ? error : new Error("EVM blok replay hatası.")));
+        await processing;
       },
       onError: (error) => void onError(error instanceof Error ? error : new Error("RPC izleme hatası.")),
     });
+  }
+
+  private async getTrackedTransactions(from: bigint, to: bigint, addresses: Set<string>) {
+    const addressTopics = [...addresses].map((address) => `0x${address.slice(2).padStart(64, "0")}`);
+    const range = { fromBlock: `0x${from.toString(16)}`, toBlock: `0x${to.toString(16)}` };
+    const requests = [
+      { jsonrpc: "2.0", id: 1, method: "eth_getLogs", params: [{ ...range, topics: [TRANSFER_TOPIC, addressTopics] }] },
+      { jsonrpc: "2.0", id: 2, method: "eth_getLogs", params: [{ ...range, topics: [TRANSFER_TOPIC, null, addressTopics] }] },
+    ];
+    const payload = await this.fetchRpcBatch<Array<{ transactionHash: Hash }>>(requests);
+    const hashes = [...new Set(payload.flatMap((item) => item.result ?? []).map((log) => log.transactionHash))];
+    const transactions = await Promise.all(hashes.map((hash) => this.client.getTransaction({ hash })));
+    return transactions
+      .filter((transaction) => addresses.has(transaction.from.toLowerCase()))
+      .map((transaction) => ({
+        hash: transaction.hash,
+        from: transaction.from.toLowerCase(),
+        to: transaction.to?.toLowerCase() ?? null,
+        input: transaction.input,
+        blockNumber: Number(transaction.blockNumber),
+        value: transaction.value,
+      } satisfies ObservedTransaction));
+  }
+
+  private async fetchRpcBatch<T>(requests: Array<Record<string, unknown>>) {
+    return fetchEvmRpcJson<Array<{ id: number; result?: T; error?: { message?: string } }>>(
+      this.id,
+      requests,
+      20_000,
+    );
   }
 
   private async getTokenMetadata(tokenAddress: string) {

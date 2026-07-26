@@ -5,9 +5,9 @@ import { evaluateWalletActivityLimit } from "../src/lib/engine/wallet-activity-l
 test("sınırdaki swap sayısına izin verir", () => {
   assert.deepEqual(evaluateWalletActivityLimit({
     swapsLastHour: 8,
-    swapsLast24Hours: 25,
+    swapsLast24Hours: 50,
     maxSwapsPerHour: 8,
-    maxSwapsPer24Hours: 25,
+    maxSwapsPer24Hours: 50,
   }), { exceeded: false, reason: null });
 });
 
@@ -16,7 +16,7 @@ test("saatlik sınır aşıldığında cüzdanı engeller", () => {
     swapsLastHour: 9,
     swapsLast24Hours: 12,
     maxSwapsPerHour: 8,
-    maxSwapsPer24Hours: 25,
+    maxSwapsPer24Hours: 50,
   });
   assert.equal(result.exceeded, true);
   assert.match(result.reason ?? "", /Son 1 saatte 9 swap/);
@@ -25,10 +25,10 @@ test("saatlik sınır aşıldığında cüzdanı engeller", () => {
 test("24 saatlik sınır aşıldığında cüzdanı engeller", () => {
   const result = evaluateWalletActivityLimit({
     swapsLastHour: 2,
-    swapsLast24Hours: 26,
+    swapsLast24Hours: 51,
     maxSwapsPerHour: 8,
-    maxSwapsPer24Hours: 25,
+    maxSwapsPer24Hours: 50,
   });
   assert.equal(result.exceeded, true);
-  assert.match(result.reason ?? "", /Son 24 saatte 26 swap/);
+  assert.match(result.reason ?? "", /Son 24 saatte 51 swap/);
 });

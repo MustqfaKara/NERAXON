@@ -8,7 +8,7 @@ export interface TokenSafetyResult {
   checks: Array<{ label: string; status: "passed" | "warning" | "failed"; detail: string }>;
 }
 
-export function evaluateTokenSafety(market: MarketSnapshot): TokenSafetyResult {
+export function evaluateTokenSafety(market: MarketSnapshot, options: { allowYoungPool?: boolean } = {}): TokenSafetyResult {
   const warnings: string[] = [];
   const checks: TokenSafetyResult["checks"] = [];
   if (market.priceUsd <= 0) return reject("Token için güvenilir USD fiyatı bulunamadı.");
@@ -18,7 +18,8 @@ export function evaluateTokenSafety(market: MarketSnapshot): TokenSafetyResult {
 
   if (market.pairCreatedAt) {
     const ageMinutes = (Date.now() - market.pairCreatedAt) / 60_000;
-    if (ageMinutes < 30) return reject("Havuz 30 dakikadan yeni; işlem güvenlik nedeniyle reddedildi.");
+    if (ageMinutes < 30 && !options.allowYoungPool) return reject("Havuz 30 dakikadan yeni; işlem güvenlik nedeniyle reddedildi.");
+    if (ageMinutes < 30) warnings.push("Havuz 30 dakikadan yeni; çoklu cüzdan teyidiyle azaltılmış pozisyon uygulanıyor.");
     if (ageMinutes < 24 * 60) warnings.push("Havuz 24 saatten daha yeni.");
     checks.push({ label: "Havuz yaşı", status: ageMinutes < 24 * 60 ? "warning" : "passed", detail: `${Math.max(1, Math.floor(ageMinutes / 60))} saatlik havuz.` });
   }

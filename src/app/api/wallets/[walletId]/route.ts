@@ -3,20 +3,33 @@ import { z } from "zod";
 import { store } from "@/lib/repositories/store";
 import { publishEvent } from "@/lib/services/audit-service";
 import { apiError } from "@/lib/utils/api";
+import { assertSameOrigin } from "@/lib/security/same-origin";
+import { integrationName } from "@/lib/domain/integrations";
 
-const schema = z.object({ paused: z.boolean() });
+const schema = z.object({
+  paused: z.boolean().optional(),
+  isFavorite: z.boolean().optional(),
+}).refine((input) => Number(input.paused !== undefined) + Number(input.isFavorite !== undefined) === 1, {
+  message: "Tek seferde yalnızca bir cüzdan özelliği güncellenebilir.",
+});
 
 export async function PATCH(request: Request, context: { params: Promise<{ walletId: string }> }) {
   try {
+    assertSameOrigin(request);
     const { walletId } = await context.params;
-    const { paused } = schema.parse(await request.json());
+    const input = schema.parse(await request.json());
+    if (input.isFavorite !== undefined) {
+      return NextResponse.json({ wallet: store.setWalletFavorite(walletId, input.isFavorite) });
+    }
+    const paused = input.paused as boolean;
     const wallet = store.setWalletPaused(walletId, paused);
+    const networkNames = wallet.trackedChainIds.map(integrationName).join(", ");
     await publishEvent({
       chainId: null,
       level: "info",
       type: "system",
       title: paused ? "Cüzdan takibi duraklatıldı" : "Cüzdan takibi yeniden başlatıldı",
-      message: `${wallet.label} (${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)}) ${paused ? "yeni bloklarda izleme dışı bırakıldı" : "Base ve Ethereum izleme setine alındı"}.`,
+      message: `${wallet.label} (${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)}) ${paused ? "yeni işlemler için izleme dışı bırakıldı" : `${networkNames} izleme setine alındı; yoğunluk sayacı yeniden başlatıldı`}.`,
       txHash: null,
     });
     return NextResponse.json({ wallet });
@@ -25,8 +38,9 @@ export async function PATCH(request: Request, context: { params: Promise<{ walle
   }
 }
 
-export async function DELETE(_request: Request, context: { params: Promise<{ walletId: string }> }) {
+export async function DELETE(request: Request, context: { params: Promise<{ walletId: string }> }) {
   try {
+    assertSameOrigin(request);
     const { walletId } = await context.params;
     const wallet = store.deleteWallet(walletId);
     await publishEvent({

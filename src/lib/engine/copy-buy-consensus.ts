@@ -10,8 +10,16 @@ export function canTriggerNextBuy(input: {
   hasPendingStage: boolean;
 }) {
   const requiredWalletCount = requiredWalletCountForNextBuy(input.completedBuyStages);
+  const reason = !input.isNewWallet
+    ? "duplicate_wallet"
+    : input.hasPendingStage
+      ? "stage_pending"
+      : input.distinctWalletCount < requiredWalletCount
+        ? "threshold_wait"
+        : "ready";
   return {
     requiredWalletCount,
     shouldCopy: input.isNewWallet && !input.hasPendingStage && input.distinctWalletCount >= requiredWalletCount,
+    reason,
   };
 }

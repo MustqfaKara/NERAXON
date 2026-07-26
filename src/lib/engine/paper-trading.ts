@@ -1,11 +1,12 @@
 import type { FeeBreakdown, ManualTradeInput, PositionLot, Trade } from "@/lib/domain/types";
 import { evaluateBuy } from "@/lib/engine/risk-engine";
 import { calculateSellQuantity } from "@/lib/engine/position-sizing";
-import { modelPaperExecution } from "@/lib/engine/paper-execution-model";
+import { explicitExecutionFees, modelPaperExecution } from "@/lib/engine/paper-execution-model";
 import { getDashboardSnapshot } from "@/lib/services/dashboard-service";
 import { publishEvent } from "@/lib/services/audit-service";
 import { store } from "@/lib/repositories/store";
 import { estimatePaperGas } from "@/lib/services/gas-estimator";
+import { getSolanaPaperRoute } from "@/lib/services/solana-paper-route";
 
 export interface PaperTradeContext {
   source: "copy" | "manual";
@@ -14,6 +15,7 @@ export interface PaperTradeContext {
   sourceLabel?: string;
   txHash?: string;
   allowConsensusBuy?: boolean;
+  allocationMultiplier?: number;
 }
 
 const MANUAL_CONTEXT: PaperTradeContext = {
@@ -59,8 +61,9 @@ async function executeBuy(input: ManualTradeInput, context: PaperTradeContext): 
 
   if (!decision.approved) return recordSkippedTrade(input, decision.reason, context);
 
-  const grossUsd = decision.allocationUsd;
-  const gasFeeUsd = input.gasFeeUsd ?? (await estimatePaperGas(input.chainId)).feeUsd;
+  const grossUsd = decision.allocationUsd * Math.max(0.1, Math.min(1, context.allocationMultiplier ?? 1));
+  const solanaRoute = input.chainId === "solana" ? await getSolanaPaperRoute({ side: "buy", tokenAddress: input.tokenAddress, tokenDecimals: input.tokenDecimals ?? 0, grossUsd, slippagePercent }) : null;
+  const gasFeeUsd = input.gasFeeUsd ?? solanaRoute?.gas.feeUsd ?? (await estimatePaperGas(input.chainId)).feeUsd;
   const executionDelayMs = input.executionDelayMs ?? (input.chainId === "base" ? 1_800 : 12_000);
   const execution = modelPaperExecution({
     side: "buy",
@@ -73,12 +76,14 @@ async function executeBuy(input: ManualTradeInput, context: PaperTradeContext): 
     priceChange24hPercent: input.priceChange24hPercent ?? 0,
     executionDelayMs,
     gasFeeUsd,
+    routePriceImpactPercent: solanaRoute?.priceImpactPercent,
+    routeDexFeePercent: solanaRoute?.dexFeePercent,
   });
   const fees = execution.fees;
   if (grossUsd + fees.gasFeeUsd > snapshot.cashBalanceUsd) {
     return recordSkippedTrade(input, "Gas dahil toplam maliyet kullanılabilir bakiyeyi aşıyor.", context);
   }
-  const effectiveTokenUsd = grossUsd - fees.dexFeeUsd - fees.slippageUsd - fees.priceImpactUsd - fees.tokenTaxUsd;
+  const effectiveTokenUsd = grossUsd - fees.dexFeeUsd - fees.tokenTaxUsd;
   const quantity = effectiveTokenUsd / execution.fillPriceUsd;
   const now = new Date().toISOString();
   store.setCashBalance(snapshot.cashBalanceUsd - grossUsd - fees.gasFeeUsd);
@@ -88,7 +93,7 @@ async function executeBuy(input: ManualTradeInput, context: PaperTradeContext): 
   store.insertPositionLot({
     id: crypto.randomUUID(),
     chainId: input.chainId,
-    tokenAddress: input.tokenAddress.toLowerCase(),
+    tokenAddress: normalizeAssetAddress(input.chainId, input.tokenAddress),
     tokenSymbol: input.tokenSymbol.toUpperCase(),
     pairAddress: input.pairAddress ?? null,
     walletId: context.source === "copy" ? context.walletId : null,
@@ -130,7 +135,17 @@ async function executeSell(input: ManualTradeInput, context: PaperTradeContext):
   const quotedGrossUsd = quantity * input.priceUsd;
   const slippagePercent = input.slippagePercent ?? 0.5;
   const liquidityUsd = input.liquidityUsd ?? 250_000;
-  const gasFeeUsd = input.gasFeeUsd ?? (await estimatePaperGas(input.chainId)).feeUsd;
+  const solanaRoute = input.chainId === "solana" && input.tokenDecimals !== undefined
+    ? await getSolanaPaperRoute({
+        side: "sell",
+        tokenAddress: input.tokenAddress,
+        tokenDecimals: input.tokenDecimals,
+        grossUsd: quotedGrossUsd,
+        tokenQuantity: quantity,
+        slippagePercent,
+      })
+    : null;
+  const gasFeeUsd = input.gasFeeUsd ?? solanaRoute?.gas.feeUsd ?? (await estimatePaperGas(input.chainId)).feeUsd;
   const executionDelayMs = input.executionDelayMs ?? (input.chainId === "base" ? 1_800 : 12_000);
   const execution = modelPaperExecution({
     side: "sell",
@@ -143,10 +158,12 @@ async function executeSell(input: ManualTradeInput, context: PaperTradeContext):
     priceChange24hPercent: input.priceChange24hPercent ?? 0,
     executionDelayMs,
     gasFeeUsd,
+    routePriceImpactPercent: solanaRoute?.priceImpactPercent,
+    routeDexFeePercent: solanaRoute?.dexFeePercent,
   });
   const grossUsd = quantity * execution.fillPriceUsd;
   const fees = execution.fees;
-  const netUsd = Math.max(0, grossUsd - fees.totalUsd);
+  const netUsd = Math.max(0, grossUsd - explicitExecutionFees(fees));
   const realizedPnlUsd = consumeLots(eligibleLots, quantity, netUsd);
   store.syncPositionFromLots(input.chainId, input.tokenAddress, execution.fillPriceUsd, { tokenSymbol: input.tokenSymbol.toUpperCase(), pairAddress: input.pairAddress });
   store.setCashBalance(snapshot.cashBalanceUsd + netUsd);
@@ -185,7 +202,7 @@ function createTrade(
     walletId: context.walletId,
     source: context.source,
     side: input.side,
-    tokenAddress: input.tokenAddress.toLowerCase(),
+    tokenAddress: normalizeAssetAddress(input.chainId, input.tokenAddress),
     tokenSymbol: input.tokenSymbol.toUpperCase(),
     quantity,
     priceUsd: input.priceUsd,
@@ -217,6 +234,8 @@ export async function recordSkippedPaperTrade(input: ManualTradeInput, reason: s
 }
 
 const recordSkippedTrade = recordSkippedPaperTrade;
+
+const normalizeAssetAddress = (chainId: ManualTradeInput["chainId"], address: string) => chainId === "solana" ? address.trim() : address.toLowerCase();
 
 function consumeLots(lots: PositionLot[], quantity: number, netProceedsUsd: number) {
   let remaining = quantity;

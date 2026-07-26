@@ -2,10 +2,12 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { addTrackedWallet } from "@/lib/services/wallet-service";
 import { apiError } from "@/lib/utils/api";
+import { assertSameOrigin } from "@/lib/security/same-origin";
 
 const schema = z.object({
   address: z.string().trim(),
   label: z.string().trim().max(40).default(""),
+  chainId: z.enum(["ethereum", "base", "robinhood", "solana", "hyperliquid"]).optional(),
   discoveryScore: z.object({
     score: z.number().int().min(0).max(100),
     breakdown: z.object({
@@ -18,7 +20,7 @@ const schema = z.object({
   }).optional(),
   observedSwapCount24h: z.number().int().nonnegative().optional(),
   discoverySnapshot: z.object({
-    chainId: z.enum(["ethereum", "base"]),
+    chainId: z.enum(["ethereum", "base", "robinhood", "solana", "hyperliquid"]),
     boughtUsd: z.number().nonnegative(),
     soldUsd: z.number().nonnegative(),
     currentValueUsd: z.number().nonnegative(),
@@ -45,8 +47,9 @@ const schema = z.object({
 
 export async function POST(request: Request) {
   try {
+    assertSameOrigin(request);
     const input = schema.parse(await request.json());
-    const wallet = await addTrackedWallet(input.address, input.label, input.discoveryScore, input.observedSwapCount24h, input.discoverySnapshot);
+    const wallet = await addTrackedWallet(input.address, input.label, input.discoveryScore, input.observedSwapCount24h, input.discoverySnapshot, input.chainId);
     return NextResponse.json({ wallet }, { status: 201 });
   } catch (error) {
     return apiError(error);
