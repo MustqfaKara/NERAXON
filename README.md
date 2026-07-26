@@ -8,7 +8,7 @@ NERAXON is a local-first copy-trading and market intelligence workspace for Ethe
 
 > NERAXON is intentionally designed to run on the operator's own Mac. Do not expose its dashboard or API port to the public internet.
 
-![NERAXON multi-network wallet discovery](./docs/neraxon-wallet-discovery-v2.png)
+![NERAXON live overview dashboard](./docs/neraxon-overview-v2.png)
 
 ## Supported Integrations
 
