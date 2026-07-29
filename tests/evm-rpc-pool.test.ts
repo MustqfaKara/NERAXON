@@ -156,3 +156,100 @@ test("metot uyumsuz RPC aynı metot için tekrar kullanılmaz", async () => {
     else process.env.BASE_RPC_FALLBACK_URLS = originalFallbacks;
   }
 });
+
+test("archive planı olmayan RPC geçmiş log isteğinde fallback endpointine geçer", async () => {
+  const originalPrimary = process.env.ETHEREUM_RPC_URL;
+  const originalFallbacks = process.env.ETHEREUM_RPC_FALLBACK_URLS;
+  const originalFetch = globalThis.fetch;
+  process.env.ETHEREUM_RPC_URL = "https://archive-limited.example";
+  process.env.ETHEREUM_RPC_FALLBACK_URLS = "https://archive-healthy.example";
+  const requestedUrls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    requestedUrls.push(url);
+    if (url === "https://archive-limited.example") {
+      return new Response(JSON.stringify({
+        error: { message: "Archive, Debug and Trace requests are not available on your current plan." },
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify([{ jsonrpc: "2.0", id: 1, result: [] }]), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  try {
+    const payload = await fetchEvmRpcJson<Array<{ result: unknown[] }>>("ethereum", [{
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_getLogs",
+      params: [],
+    }]);
+    assert.deepEqual(payload, [{ jsonrpc: "2.0", id: 1, result: [] }]);
+    assert.deepEqual(requestedUrls.slice(0, 2), [
+      "https://archive-limited.example",
+      "https://archive-healthy.example",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalPrimary === undefined) delete process.env.ETHEREUM_RPC_URL;
+    else process.env.ETHEREUM_RPC_URL = originalPrimary;
+    if (originalFallbacks === undefined) delete process.env.ETHEREUM_RPC_FALLBACK_URLS;
+    else process.env.ETHEREUM_RPC_FALLBACK_URLS = originalFallbacks;
+  }
+});
+
+test("yalnızca eth_getLogs desteklemeyen RPC diğer metotlar için kullanılmaya devam eder", async () => {
+  const originalPrimary = process.env.ETHEREUM_RPC_URL;
+  const originalFallbacks = process.env.ETHEREUM_RPC_FALLBACK_URLS;
+  const originalFetch = globalThis.fetch;
+  process.env.ETHEREUM_RPC_URL = "https://logs-limited.example";
+  process.env.ETHEREUM_RPC_FALLBACK_URLS = "https://logs-healthy.example";
+  const requestedUrls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const request = JSON.parse(String(init?.body)) as Record<string, unknown> | Array<Record<string, unknown>>;
+    requestedUrls.push(`${url}:${Array.isArray(request) ? "logs" : String(request.method)}`);
+    if (url === "https://logs-limited.example" && Array.isArray(request)) {
+      return new Response("Your current plan does not support the eth_getLogs method.", {
+        status: 403,
+        headers: { "content-type": "text/plain" },
+      });
+    }
+    const payload = Array.isArray(request)
+      ? [{ jsonrpc: "2.0", id: 1, result: [] }]
+      : { jsonrpc: "2.0", id: 1, result: "0x10" };
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  try {
+    await fetchEvmRpcJson("ethereum", [{
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_getLogs",
+      params: [],
+    }]);
+    const blockPayload = await fetchEvmRpcJson<{ result: string }>("ethereum", {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "eth_blockNumber",
+      params: [],
+    });
+    assert.equal(blockPayload.result, "0x10");
+    assert.deepEqual(requestedUrls.slice(0, 3), [
+      "https://logs-limited.example:logs",
+      "https://logs-healthy.example:logs",
+      "https://logs-limited.example:eth_blockNumber",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalPrimary === undefined) delete process.env.ETHEREUM_RPC_URL;
+    else process.env.ETHEREUM_RPC_URL = originalPrimary;
+    if (originalFallbacks === undefined) delete process.env.ETHEREUM_RPC_FALLBACK_URLS;
+    else process.env.ETHEREUM_RPC_FALLBACK_URLS = originalFallbacks;
+  }
+});

@@ -6,6 +6,8 @@ import { publishEvent } from "@/lib/services/audit-service";
 import { store } from "@/lib/repositories/store";
 import { processCopyableSwap } from "@/lib/services/copy-trading-service";
 import { isRecoverableOperationalHalt, resetCircuitBreaker } from "@/lib/services/circuit-breaker-service";
+import { isRecoverableReconciliationHalt } from "@/lib/engine/circuit-breaker-recovery";
+import { isRecoverableRpcMonitoringError } from "@/lib/chains/runtime-error-policy";
 import { recordServiceHealth } from "@/lib/services/service-health";
 import { executeHypercoreCopyFill } from "@/lib/engine/hypercore-paper-trading";
 import { areOnlyStablecoinMovements, isStablecoinSymbol } from "@/lib/engine/stablecoin-filter";
@@ -14,14 +16,17 @@ import { reconcileIntegration, recoverPendingLiveExecutions } from "@/lib/servic
 import { reconcileSourcePositions } from "@/lib/services/source-position-reconciliation";
 import { flushNotificationOutbox } from "@/lib/services/notification-outbox";
 import { getRuntimeOwnerId, PRIMARY_RUNTIME_LEASE, PRIMARY_RUNTIME_LEASE_TTL_MS } from "@/lib/services/runtime-instance";
+import { isEvmCursorStalled } from "@/lib/chains/cursor-stall";
+import { isEvmChain } from "@/lib/domain/defaults";
 
 const SOURCE_RECONCILIATION_INTERVAL_MS = 5 * 60_000;
-const LIVE_RECONCILIATION_INTERVAL_MS = 30 * 60_000;
+const LIVE_RECONCILIATION_INTERVAL_MS = 5 * 60_000;
 const OPERATIONAL_WARNING_INTERVAL_MS = 5 * 60_000;
 
 class BotOrchestrator {
   private readonly ownerId = getRuntimeOwnerId();
   private readonly stopHandlers = new Map<ChainId, () => void>();
+  private readonly watcherStartedAt = new Map<ChainId, number>();
   private readonly pendingStarts = new Map<ChainId, Promise<ChainRuntime>>();
   private readonly operationalFailures = new Map<ChainId, number>();
   private pendingReconcile: Promise<void> | null = null;
@@ -69,9 +74,20 @@ class BotOrchestrator {
     await recoverPendingLiveExecutions();
     await this.reconcileShadowSourcesIfDue();
     await this.reconcileLivePortfolioIfDue();
-    const breaker = store.getCircuitBreaker();
-    if (breaker.halted) {
-      if (!isRecoverableOperationalHalt(breaker)) return;
+    let breaker = store.getCircuitBreaker();
+    if (isRecoverableReconciliationHalt(breaker, store.listReconciliation())) {
+      resetCircuitBreaker();
+      breaker = store.getCircuitBreaker();
+      await publishEvent({
+        chainId: null,
+        level: "info",
+        type: "system",
+        title: "Canlı mutabakat kilidi otomatik kaldırıldı",
+        message: "Devre kesiciyi açan ağ için daha yeni portföy mutabakatı başarıyla tamamlandı. Canlı emir akışı yeniden etkinleştirildi.",
+        txHash: null,
+      });
+    }
+    if (breaker.halted && isRecoverableOperationalHalt(breaker)) {
       const healthResults = await Promise.allSettled(store.listChains().map(async (chain) => {
         const health = await getChainAdapter(chain.id).checkHealth();
         recordServiceHealth(`${chain.id}_rpc`, health.latencyMs, null);
@@ -84,6 +100,7 @@ class BotOrchestrator {
       }));
       if (healthResults.some((result) => result.status === "rejected")) return;
       resetCircuitBreaker();
+      breaker = store.getCircuitBreaker();
       await publishEvent({
         chainId: null,
         level: "info",
@@ -101,6 +118,35 @@ class BotOrchestrator {
     const excludedRunningChains = store.listChains()
       .filter((chain) => !isIntegrationInScope(chain.id) && chain.status !== "stopped");
     await Promise.allSettled(excludedRunningChains.map((chain) => this.stop(chain.id)));
+
+    const stalledChains = store.listChains().filter((chain) => {
+      if (!isEvmChain(chain.id) || chain.status !== "running" || !this.stopHandlers.has(chain.id)) return false;
+      const cursor = store.getChainCursorState(chain.id);
+      return isEvmCursorStalled({
+        chainId: chain.id,
+        lastBlock: chain.lastBlock,
+        cursor: cursor?.cursor ?? null,
+        cursorUpdatedAt: cursor?.updatedAt ?? null,
+        watcherStartedAt: this.watcherStartedAt.get(chain.id) ?? null,
+      });
+    });
+    for (const chain of stalledChains) {
+      this.stopHandlers.get(chain.id)?.();
+      this.stopHandlers.delete(chain.id);
+      this.watcherStartedAt.delete(chain.id);
+      store.updateChain(chain.id, {
+        status: "error",
+        errorMessage: `${chain.name} işlem cursor'u ilerlemedi; izleyici otomatik yenileniyor.`,
+      });
+      await publishEvent({
+        chainId: chain.id,
+        level: "warning",
+        type: "system",
+        title: `${chain.name} cüzdan izleyicisi yenileniyor`,
+        message: "Blok sağlık akışı devam ederken işlem cursor'u ilerlemedi. Kaçırılan bloklar kayıtlı cursor üzerinden yeniden taranacak; devre kesici açıksa canlı emir gönderilmeyecek.",
+        txHash: null,
+      });
+    }
 
     const recoverableChains = store.listChains().filter((chain) => (
       isIntegrationInScope(chain.id)
@@ -164,6 +210,7 @@ class BotOrchestrator {
   private deactivateLocalWatchers() {
     for (const stop of this.stopHandlers.values()) stop();
     this.stopHandlers.clear();
+    this.watcherStartedAt.clear();
   }
 
   private async startInternal(chainId: ChainId): Promise<ChainRuntime> {
@@ -176,11 +223,11 @@ class BotOrchestrator {
     if (mode === "live" && !isLivePilotIntegration(chainId)) {
       throw new Error(`${chain.name} ilk canlı pilot kapsamına dahil değil.`);
     }
-    if (store.getCircuitBreaker().halted) throw new Error("Devre kesici aktif; botu başlatmadan önce Risk Ayarları ekranından engeli sıfırla.");
     if (chain.status === "running" && this.stopHandlers.has(chainId)) return chain;
     if (this.stopHandlers.has(chainId)) {
       this.stopHandlers.get(chainId)?.();
       this.stopHandlers.delete(chainId);
+      this.watcherStartedAt.delete(chainId);
     }
 
     store.updateChain(chainId, { status: "starting", errorMessage: null });
@@ -330,7 +377,8 @@ class BotOrchestrator {
           if (!active) return;
           const failures = (this.operationalFailures.get(chainId) ?? 0) + 1;
           this.operationalFailures.set(chainId, failures);
-          const thresholdReached = failures >= (store.getRiskSettings().maxConsecutiveFailures ?? 3);
+          const recoverable = isRecoverableRpcMonitoringError(error);
+          const thresholdReached = !recoverable && failures >= (store.getRiskSettings().maxConsecutiveFailures ?? 3);
           const current = store.getChain(chainId);
           if (current?.status === "error" && current.errorMessage === error.message && thresholdReached) return;
           if (thresholdReached) {
@@ -367,6 +415,7 @@ class BotOrchestrator {
         stopWatching();
       };
       this.stopHandlers.set(chainId, stop);
+      this.watcherStartedAt.set(chainId, Date.now());
       await publishEvent({
         chainId,
         level: "info",
@@ -402,6 +451,7 @@ class BotOrchestrator {
     store.updateChain(chainId, { status: "stopping" });
     this.stopHandlers.get(chainId)?.();
     this.stopHandlers.delete(chainId);
+    this.watcherStartedAt.delete(chainId);
     this.operationalFailures.set(chainId, 0);
     const stopped = store.updateChain(chainId, { status: "stopped", errorMessage: null });
     await publishEvent({
@@ -420,7 +470,7 @@ const formatMovementAmount = (value: number) => value.toLocaleString("tr-TR", { 
 const shortAddress = (value: string) => `${value.slice(0, 6)}…${value.slice(-4)}`;
 
 const OBSERVED_TRANSACTION_TTL_MS = 60 * 60 * 1_000;
-const ORCHESTRATOR_VERSION = 22;
+const ORCHESTRATOR_VERSION = 25;
 const globalState = globalThis as typeof globalThis & {
   neraxonOrchestrator?: BotOrchestrator;
   neraxonOrchestratorVersion?: number;

@@ -8,6 +8,7 @@ import { publishEvent } from "@/lib/services/audit-service";
 import { solanaRpc } from "@/lib/solana/helius-client";
 import { getExecutionAccount } from "@/lib/services/execution-account-service";
 import { SOLANA_TOKEN_2022_PROGRAM_ID, SOLANA_TOKEN_PROGRAM_ID } from "@/lib/solana/constants";
+import { planExternalBalanceAdjustment } from "@/lib/engine/external-balance-reconciliation";
 
 export const EVM_CERTIFICATION_STEPS = ["small_buy", "partial_sell", "full_sell"] as const;
 export const HYPERCORE_CERTIFICATION_STEPS = ["spot_open", "spot_close", "perp_open", "perp_reduce", "perp_close"] as const;
@@ -206,14 +207,61 @@ async function reconcileEvm(chainId: EvmChainId) {
   const client = getPublicClient(chainId);
   await client.getBalance({ address });
   const lots = store.listExecutionLots("live", chainId).filter((lot) => lot.status === "open" && lot.marketType === "evm");
-  const byToken = new Map<string, bigint>();
-  for (const lot of lots) byToken.set(lot.assetKey, (byToken.get(lot.assetKey) ?? 0n) + BigInt(lot.amount));
-  for (const [tokenAddress, expected] of byToken) {
-    if (expected <= 0n) throw new Error(`${tokenAddress} için açık live lot miktarı sıfır; mutabakat geçemez.`);
-    const actual = await client.readContract({ address: tokenAddress as `0x${string}`, abi: erc20Abi, functionName: "balanceOf", args: [address] });
-    if (actual < expected) throw new Error(`${tokenAddress} bakiyesi yerel lotlardan düşük. Zincir: ${actual}, yerel: ${expected}.`);
+  const byToken = new Map<string, typeof lots>();
+  for (const lot of lots) byToken.set(lot.assetKey, [...(byToken.get(lot.assetKey) ?? []), lot]);
+  const entries = [...byToken.entries()];
+  const contracts = entries.map(([tokenAddress]) => ({
+    address: tokenAddress as `0x${string}`,
+    abi: erc20Abi,
+    functionName: "balanceOf" as const,
+    args: [address] as const,
+  }));
+  const balances = await client.multicall({
+    allowFailure: true,
+    contracts,
+  }).catch(async (error) => {
+    if (!(error instanceof Error) || !error.message.includes("multicallAddress is required")) throw error;
+    return Promise.all(contracts.map(async (contract) => {
+      try {
+        const result = await client.readContract(contract);
+        return { status: "success" as const, result };
+      } catch (readError) {
+        return {
+          status: "failure" as const,
+          error: readError instanceof Error ? readError : new Error("Token bakiyesi okunamadı."),
+        };
+      }
+    }));
+  });
+  let adjustedCount = 0;
+  for (const [index, [tokenAddress, tokenLots]] of entries.entries()) {
+    const balance = balances[index];
+    if (balance.status === "failure") throw new Error(`${tokenAddress} zincir bakiyesi okunamadı: ${balance.error.message}`);
+    const adjustment = planExternalBalanceAdjustment(tokenLots, BigInt(String(balance.result)));
+    if (!adjustment) continue;
+    const symbol = tokenLots[0]?.assetSymbol || tokenAddress;
+    store.reduceExecutionLots(
+      tokenLots,
+      adjustment.reductionAmount.toString(),
+      adjustment.hasMarketPrice
+        ? { netProceedsUsd: adjustment.estimatedNetProceedsUsd, feesUsd: 0 }
+        : undefined,
+    );
+    adjustedCount += 1;
+    await publishEvent({
+      chainId,
+      level: "warning",
+      type: "system",
+      title: `${symbol} harici satışla eşitlendi`,
+      message: adjustment.hasMarketPrice
+        ? `Cüzdan bakiyesi yerel kayıttan düşük olduğu için ${symbol} lotu zincir bakiyesine indirildi. Harici satışın gerçek fill verisi uygulamada bulunmadığından yaklaşık ${adjustment.estimatedRealizedPnlUsd.toFixed(4)} USD sonuç son piyasa fiyatıyla kaydedildi. Yeni emir gönderilmedi.`
+        : `Cüzdan bakiyesi yerel kayıttan düşük olduğu için ${symbol} lotu zincir bakiyesine indirildi. Güncel fiyat bulunamadığından harici satış PnL'si lota eklenmedi. Yeni emir gönderilmedi.`,
+      txHash: null,
+    });
   }
-  return `${byToken.size} token için zincir bakiyesi yerel live lotlarını karşılıyor.`;
+  return adjustedCount
+    ? `${byToken.size} token kontrol edildi; ${adjustedCount} token harici cüzdan hareketlerine göre yerel lotlarla eşitlendi.`
+    : `${byToken.size} token için zincir bakiyesi yerel live lotlarını karşılıyor.`;
 }
 
 async function reconcileHypercore() {

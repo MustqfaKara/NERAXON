@@ -71,7 +71,7 @@ export async function reconcileSourcePositions(options: { publishNoop?: boolean 
     results.push(await reconcileSpotLots(lots));
   }
 
-  const markets = await getHypercoreMarkets(true).catch(() => []);
+  const markets = await getHypercoreMarkets().catch(() => []);
   for (const position of store.listHypercorePositions().filter((item) => item.walletId)) {
     results.push(await reconcileHypercorePosition(position, markets));
   }

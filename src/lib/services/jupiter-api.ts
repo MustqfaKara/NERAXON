@@ -36,7 +36,19 @@ export interface JupiterSwapTransaction {
   computeUnitLimit?: number;
 }
 
+export interface JupiterShieldWarning {
+  type: string;
+  message: string;
+  severity: "info" | "warning" | "error" | string;
+}
+
+interface JupiterShieldResponse {
+  warnings?: Record<string, JupiterShieldWarning[]>;
+}
+
 const apiBase = () => process.env.JUPITER_API_URL?.trim() || "https://api.jup.ag/swap/v1";
+const SHIELD_CACHE_TTL_MS = 10 * 60_000;
+const shieldCache = new Map<string, { warnings: JupiterShieldWarning[]; expiresAt: number }>();
 const headers = () => ({
   accept: "application/json",
   "content-type": "application/json",
@@ -96,4 +108,25 @@ export async function buildJupiterSwap(quote: JupiterQuote, userPublicKey: strin
     throw new Error(payload.error ?? `Jupiter swap işlemi hazırlanamadı (${response.status}).`);
   }
   return payload;
+}
+
+export async function getJupiterShieldWarnings(mint: string) {
+  const cached = shieldCache.get(mint);
+  if (cached && cached.expiresAt > Date.now()) return cached.warnings;
+  const apiKey = readCredentialSync("jupiter-api-key");
+  if (!apiKey) throw new Error("Jupiter API anahtarı yapılandırılmadı.");
+  const url = new URL("https://api.jup.ag/ultra/v1/shield");
+  url.searchParams.set("mints", mint);
+  const response = await monitorService("jupiter", () => fetch(url, {
+    headers: { accept: "application/json", "x-api-key": apiKey },
+    signal: AbortSignal.timeout(10_000),
+    cache: "no-store",
+  }));
+  const payload = await response.json().catch(() => null) as JupiterShieldResponse | null;
+  if (!response.ok || !payload?.warnings || !Array.isArray(payload.warnings[mint])) {
+    throw new Error(`Jupiter Shield doğrulaması tamamlanamadı (${response.status}).`);
+  }
+  const warnings = payload.warnings[mint];
+  shieldCache.set(mint, { warnings, expiresAt: Date.now() + SHIELD_CACHE_TTL_MS });
+  return warnings;
 }

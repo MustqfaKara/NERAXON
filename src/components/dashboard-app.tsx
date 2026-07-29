@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { createPortal } from "react-dom";
 import {
   Activity,
   AlertTriangle,
@@ -68,8 +69,9 @@ import type {
   TelegramUserChat,
   AiTradeAdvisory,
 } from "@/lib/domain/types";
-import { MAX_DISCOVERY_BOUGHT_USD, MIN_DISCOVERY_BOUGHT_USD, MIN_DISCOVERY_PNL_USD, MIN_SOLANA_DISCOVERY_PNL_USD } from "@/lib/engine/discovery-pnl";
+import { MAX_DISCOVERY_BOUGHT_USD, MIN_DISCOVERY_BOUGHT_USD, MIN_DISCOVERY_PNL_PERCENT, MIN_DISCOVERY_PNL_USD, MIN_SOLANA_DISCOVERY_PNL_USD } from "@/lib/engine/discovery-pnl";
 import { executionLotNetPnl } from "@/lib/engine/execution-wallet-performance";
+import { effectiveWalletChainIds, walletTracksEffectiveChain } from "@/lib/engine/wallet-network-scope";
 import { useDocumentTranslation } from "@/lib/client-translation";
 import { localeFor } from "@/lib/i18n";
 import { INTEGRATION_CATALOG, INTEGRATION_IDS, LIVE_PILOT_INTEGRATION_IDS, SHADOW_TEST_INTEGRATION_IDS, integrationExplorerUrl, integrationMarketUrl, integrationName, isLivePilotIntegration, isShadowTestIntegration } from "@/lib/domain/integrations";
@@ -192,24 +194,15 @@ export function DashboardApp({ initialView, initialLanguage }: { initialView: Vi
   useEffect(() => {
     activeViewRef.current = initialView;
     scrollPageToTop();
-    let marketTimer: number | null = null;
-    const initialTimer = window.setTimeout(async () => {
-      await refresh({
+    const initialTimer = window.setTimeout(() => {
+      void refresh({
         targetView: initialView,
         refreshMarkets: initialView === "wallets",
+        refreshPortfolio: initialView === "overview" || initialView === "my-wallets",
         showSuccess: false,
       });
-      if (initialView === "overview" || initialView === "my-wallets") {
-        marketTimer = window.setTimeout(
-          () => void refresh({ silent: true, refreshPortfolio: true, showSuccess: false, targetView: initialView }),
-          350,
-        );
-      }
     }, 0);
-    return () => {
-      window.clearTimeout(initialTimer);
-      if (marketTimer !== null) window.clearTimeout(marketTimer);
-    };
+    return () => window.clearTimeout(initialTimer);
   }, [initialView, refresh]);
 
   const hasRunningChain = data?.chains.some((chain) => chain.status === "running") ?? false;
@@ -582,9 +575,9 @@ function MyWallets({ data }: { data: DashboardSnapshot }) {
           <div><span>Pozisyon değeri</span><strong>{overviewUsd(account?.positionValueUsd ?? 0)}</strong></div>
           <div><span>İade edilebilir rezerv</span><strong>{overviewUsd(account?.reservedBalanceUsd ?? 0)}</strong></div>
           <div><span>Net PnL</span><strong className={(account?.equityUsd ?? 0) - (account?.startingEquityUsd ?? 0) >= 0 ? "positive" : "negative"}>{signedOverviewUsd((account?.equityUsd ?? 0) - (account?.startingEquityUsd ?? 0))}</strong></div>
-          <div><span>İşlem PnL</span><strong className={(account?.executionRealizedPnlUsd ?? 0) >= 0 ? "positive" : "negative"}>{signedOverviewUsd(account?.executionRealizedPnlUsd ?? 0)}</strong></div>
+          <div><span>Yerel işlem PnL</span><strong className={(account?.executionRealizedPnlUsd ?? 0) >= 0 ? "positive" : "negative"}>{signedOverviewUsd(account?.executionRealizedPnlUsd ?? 0)}</strong></div>
           <div><span>Gerçekleşmemiş PnL</span><strong className={(account?.unrealizedPnlUsd ?? 0) >= 0 ? "positive" : "negative"}>{signedOverviewUsd(account?.unrealizedPnlUsd ?? 0)}</strong></div>
-          <div><span>Bakiye/funding farkı</span><strong className={(account?.fundingTokenPnlUsd ?? 0) >= 0 ? "positive" : "negative"}>{signedOverviewUsd(account?.fundingTokenPnlUsd ?? 0)}</strong></div>
+          <div><span>İşlem dışı hesap farkı</span><strong className={(account?.accountResidualPnlUsd ?? account?.fundingTokenPnlUsd ?? 0) >= 0 ? "positive" : "negative"}>{signedOverviewUsd(account?.accountResidualPnlUsd ?? account?.fundingTokenPnlUsd ?? 0)}</strong></div>
           <div><span>Bugünkü değişim</span><strong className={(account?.equityUsd ?? 0) >= (account?.dailyStartEquityUsd ?? 0) ? "positive" : "negative"}>{signedOverviewUsd((account?.equityUsd ?? 0) - (account?.dailyStartEquityUsd ?? 0))}</strong></div>
         </div>
         {account && <div className="my-wallet-costs"><span>Ağ ücreti <strong>{preciseUsd(account.networkCostsUsd)}</strong></span><span>DEX ücreti <strong>{preciseUsd(account.dexCostsUsd)}</strong></span><span>Toplam maliyet <strong>{preciseUsd(account.totalCostsUsd)}</strong></span></div>}
@@ -656,8 +649,8 @@ function WalletsView({ data, onChanged, onNotice }: { data: DashboardSnapshot; o
   const [formOpen, setFormOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [query, setQuery] = useState("");
-  const networkWallets = wallets.filter((wallet) => wallet.trackedChainIds.includes(activeChainId));
-  const filtered = networkWallets.filter((wallet) => `${wallet.label} ${wallet.address} ${wallet.trackedChainIds.map(integrationName).join(" ")}`.toLowerCase().includes(query.toLowerCase()));
+  const networkWallets = wallets.filter((wallet) => walletTracksEffectiveChain(wallet, activeChainId));
+  const filtered = networkWallets.filter((wallet) => `${wallet.label} ${wallet.address} ${effectiveWalletChainIds(wallet).map(integrationName).join(" ")}`.toLowerCase().includes(query.toLowerCase()));
   const walletById = new Map(wallets.map((wallet) => [wallet.id, wallet]));
   const networkCopyLots = data.executionLots.filter((lot) =>
     lot.mode === data.mode
@@ -681,7 +674,11 @@ function WalletsView({ data, onChanged, onNotice }: { data: DashboardSnapshot; o
   const pausedCopyPnlUsd = copyPnlUsd - activeCopyPnlUsd;
   const portfolio = data.mode === "live" ? data.livePortfolio : data.mode === "shadow" ? data.shadowPortfolio : [];
   const networkAccount = portfolio.find((account) => account.integrationId === activeChainId);
-  const accountDifferenceUsd = networkAccount ? networkAccount.realizedPnlUsd - copyPnlUsd : null;
+  const accountNetPnlUsd = networkAccount ? networkAccount.equityUsd - networkAccount.startingEquityUsd : null;
+  const nonCopyExecutionPnlUsd = networkAccount?.nonCopyExecutionPnlUsd ?? 0;
+  const accountDifferenceUsd = accountNetPnlUsd === null
+    ? null
+    : accountNetPnlUsd - copyPnlUsd - nonCopyExecutionPnlUsd;
   const pnlText = (value: number) => Math.abs(value) < 0.0005 ? overviewUsd(0) : signedOverviewUsd(value);
   const pnlTone = (value: number) => Math.abs(value) < 0.0005 ? "" : value > 0 ? "positive-text" : "negative-text";
 
@@ -705,11 +702,11 @@ function WalletsView({ data, onChanged, onNotice }: { data: DashboardSnapshot; o
 
   return <>
     <div className="view-stack">
-      <section className="page-intro"><div><span className="eyebrow">Takip merkezi</span><h2>Cüzdanlar</h2><p>Her cüzdan yalnızca seçtiğin ağlardaki işlemleri için izlenir; skor gözlenen davranışlarla güncellenir.</p></div><button type="button" className="wallet-add-button" onClick={openForm}><UserPlus size={16} /> Yeni cüzdan</button></section>
+      <section className="page-intro"><div><span className="eyebrow">Takip merkezi</span><h2>Cüzdanlar</h2><p>Cüzdanlar seçili ağlarda izlenir; yıldızlanan cüzdanlar adresleriyle uyumlu tüm ağlarda copy trade kapsamına alınır.</p></div><button type="button" className="wallet-add-button" onClick={openForm}><UserPlus size={16} /> Yeni cüzdan</button></section>
       <section className="wallet-network-filter">
         <div className="discovery-chain-tabs wallet-chain-tabs" role="tablist" aria-label="Cüzdan ağı">
           {INTEGRATION_IDS.map((id) => {
-            const count = wallets.filter((wallet) => wallet.trackedChainIds.includes(id)).length;
+            const count = wallets.filter((wallet) => walletTracksEffectiveChain(wallet, id)).length;
             return <button type="button" role="tab" aria-selected={activeChainId === id} className={activeChainId === id ? "selected" : ""} key={id} onClick={() => setActiveChainId(id)}><span className={`chain-logo ${id}`}>{INTEGRATION_CATALOG[id].shortName}</span><span><strong>{integrationName(id)}</strong><small>{count} cüzdan</small></span></button>;
           })}
         </div>
@@ -721,22 +718,23 @@ function WalletsView({ data, onChanged, onNotice }: { data: DashboardSnapshot; o
             <div><strong>PnL mutabakatı</strong><small>{integrationName(activeChainId)} copy işlemleri ve gerçek hesap sonucu</small></div>
           </div>
           <div className="wallet-pnl-difference">
-            <span>Hesap düzeyi fark</span>
+            <span>İşlem dışı hesap farkı</span>
             <strong className={accountDifferenceUsd === null ? "" : pnlTone(accountDifferenceUsd)}>{accountDifferenceUsd === null ? "—" : pnlText(accountDifferenceUsd)}</strong>
-            <small>Sertifikasyon, manuel işlem ve artık varlıklar</small>
+            <small>Ağ tokeni fiyatı, sertifikasyon, harici hareket ve artık varlıklar</small>
           </div>
         </header>
         <div className="wallet-pnl-metrics">
           <div><span>Aktif cüzdanlar</span><strong className={pnlTone(activeCopyPnlUsd)}>{pnlText(activeCopyPnlUsd)}</strong><small>Takibi açık cüzdanların copy sonucu</small></div>
           <div><span>Duraklatılmış cüzdanlar</span><strong className={pnlTone(pausedCopyPnlUsd)}>{pnlText(pausedCopyPnlUsd)}</strong><small>Geçmiş copy işlemleri korunur</small></div>
           <div><span>Toplam copy PnL</span><strong className={pnlTone(copyPnlUsd)}>{pnlText(copyPnlUsd)}</strong><small>Tüm kaynak cüzdanların net sonucu</small></div>
-          <div><span>Gerçek hesap PnL</span><strong className={networkAccount ? pnlTone(networkAccount.realizedPnlUsd) : ""}>{networkAccount ? pnlText(networkAccount.realizedPnlUsd) : "—"}</strong><small>İlk canlı özsermayeye göre</small></div>
+          <div><span>Copy dışı işlem PnL</span><strong className={pnlTone(nonCopyExecutionPnlUsd)}>{pnlText(nonCopyExecutionPnlUsd)}</strong><small>Manuel ve sertifikasyon lotları</small></div>
+          <div><span>Gerçek hesap net PnL</span><strong className={accountNetPnlUsd === null ? "" : pnlTone(accountNetPnlUsd)}>{accountNetPnlUsd === null ? "—" : pnlText(accountNetPnlUsd)}</strong><small>İlk canlı özsermayeye göre</small></div>
         </div>
       </section>}
       <section className="wallet-layout">
         <div className="table-panel wallet-table-panel">
           <div className="table-toolbar"><div key={activeChainId}><h3>{integrationName(activeChainId)} cüzdanları</h3><span>{networkWallets.length} cüzdan</span></div><label className="search-box"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ara" /></label></div>
-          {filtered.length ? <WalletTable wallets={filtered} pnlByWallet={networkPnlByWallet} onChanged={onChanged} onNotice={onNotice} /> : <EmptyState icon={WalletCards} title={networkWallets.length ? "Sonuç bulunamadı" : `${integrationName(activeChainId)} takip listesi boş`} body={networkWallets.length ? "Arama ifadesini değiştirerek tekrar dene." : "Bu ağ için yeni bir cüzdan ekleyebilir veya keşif listesinden seçim yapabilirsin."} />}
+          {filtered.length ? <WalletTable wallets={filtered} chainId={activeChainId} pnlByWallet={networkPnlByWallet} onChanged={onChanged} onNotice={onNotice} /> : <EmptyState icon={WalletCards} title={networkWallets.length ? "Sonuç bulunamadı" : `${integrationName(activeChainId)} takip listesi boş`} body={networkWallets.length ? "Arama ifadesini değiştirerek tekrar dene." : "Bu ağ için yeni bir cüzdan ekleyebilir veya keşif listesinden seçim yapabilirsin."} />}
         </div>
       </section>
     </div>
@@ -873,7 +871,7 @@ function DiscoveryView({ wallets, onChanged, onNotice }: { wallets: TrackedWalle
         <button key={chainId ?? "unselected"} className="discovery-run" type="button" disabled={!chainId || scanning !== null} onClick={() => void runScan()}>{chainId && scanning === chainId ? <RefreshCw size={17} className="spin" /> : <Radar size={17} />} {!chainName ? "Bir ağ seç" : scanning === chainId ? "24 saat taranıyor" : `${chainName} taramasını çalıştır`}</button>
       </section>
       {chainId ? <div className="discovery-network-content" key={chainId}>{visibleScan ? <>
-        <div className="scan-summary"><span><strong>{rankedCandidates.length}</strong> uygun cüzdan</span><span><strong>{usd(MIN_DISCOVERY_BOUGHT_USD)}–{usd(MAX_DISCOVERY_BOUGHT_USD)}</strong> sermaye filtresi</span><span><strong>{usd(chainId === "solana" ? MIN_SOLANA_DISCOVERY_PNL_USD : MIN_DISCOVERY_PNL_USD)}+</strong> net kâr filtresi</span><span><strong>2–50</strong> swap filtresi</span><span><strong>{visibleScan.topGainers.length}</strong> yükselen piyasa</span><span><strong>{visibleScan.transferSampleSize}</strong> {chainId === "hyperliquid" ? "fill" : chainId === "solana" && visibleScan.pnlDataSource === "birdeye+helius+dexscreener" ? "top trader örneği" : "token transferi"}</span>{visibleScan.diagnostics && <span><strong>{visibleScan.diagnostics.pnlValidatedWallets}</strong> PnL doğrulaması</span>}<span>Kaynak: <strong>{visibleScan.pnlDataSource === "hyperliquid-leaderboard" ? "Hyperliquid Leaderboard + Info API" : visibleScan.pnlDataSource === "birdeye+helius+dexscreener" ? "Birdeye + Helius + DexScreener" : visibleScan.pnlDataSource === "helius+dexscreener" ? "Helius + DexScreener" : visibleScan.pnlDataSource === "dexscreener+geckoterminal+rpc" ? "DexScreener + GeckoTerminal + RPC" : visibleScan.pnlDataSource === "dexscreener+public-rpc" ? "DexScreener + Public RPC" : visibleScan.pnlDataSource === "dexscreener+rpc" ? "DexScreener + Robinhood RPC" : "DexScreener + Alchemy"}</strong></span><span>Güncellendi: <strong>{relativeTime(visibleScan.generatedAt)}</strong></span></div>
+        <div className="scan-summary"><span><strong>{rankedCandidates.length}</strong> uygun cüzdan</span><span><strong>{usd(MIN_DISCOVERY_BOUGHT_USD)}–{usd(MAX_DISCOVERY_BOUGHT_USD)}</strong> sermaye filtresi</span><span><strong>{usd(chainId === "solana" ? MIN_SOLANA_DISCOVERY_PNL_USD : MIN_DISCOVERY_PNL_USD)}+</strong> net kâr filtresi</span><span><strong>%{MIN_DISCOVERY_PNL_PERCENT}+</strong> net ROI filtresi</span><span><strong>2–50</strong> swap filtresi</span><span><strong>{visibleScan.topGainers.length}</strong> yükselen piyasa</span><span><strong>{visibleScan.transferSampleSize}</strong> {chainId === "hyperliquid" ? "fill" : chainId === "solana" && visibleScan.pnlDataSource === "birdeye+helius+dexscreener" ? "top trader örneği" : "token transferi"}</span>{visibleScan.diagnostics && <span><strong>{visibleScan.diagnostics.pnlValidatedWallets}</strong> PnL doğrulaması</span>}<span>Kaynak: <strong>{visibleScan.pnlDataSource === "hyperliquid-leaderboard" ? "Hyperliquid Leaderboard + Info API" : visibleScan.pnlDataSource === "birdeye+helius+dexscreener" ? "Birdeye + Helius + DexScreener" : visibleScan.pnlDataSource === "helius+dexscreener" ? "Helius + DexScreener" : visibleScan.pnlDataSource === "dexscreener+geckoterminal+rpc" ? "DexScreener + GeckoTerminal + RPC" : visibleScan.pnlDataSource === "dexscreener+public-rpc" ? "DexScreener + Public RPC" : visibleScan.pnlDataSource === "dexscreener+rpc" ? "DexScreener + Robinhood RPC" : "DexScreener + Alchemy"}</strong></span><span>Güncellendi: <strong>{relativeTime(visibleScan.generatedAt)}</strong></span></div>
         {visibleScan.diagnostics?.status === "partial" && <div className="scan-partial-warning" role="status">Tarama kısmi tamamlandı: {visibleScan.diagnostics.pnlValidatedWallets}/{visibleScan.diagnostics.attemptedWallets ?? 0} cüzdanın PnL verisi doğrulandı. Eksik sonuç önbelleğe alınmadı; sonraki tarama yalnızca süresi dolan veya başarısız verileri yeniden isteyecek.</div>}
         <div className="gainer-strip" role="group" aria-label="24 saatlik örneklemde yükselen piyasalar">{visibleScan.topGainers.map((token, index) => <div className={`gainer-card ${token.address === selectedTokenAddress ? "selected" : ""}`} key={token.address}><button type="button" className="gainer-filter" aria-pressed={token.address === selectedTokenAddress} onClick={() => setSelectedTokens((current) => ({ ...current, [chainId]: current[chainId] === token.address ? null : token.address }))}><span>#{index + 1}</span><strong>{token.symbol}</strong><b>+%{token.priceChange24hPercent.toFixed(1)}</b><small>{wholeUsd(token.volume24hUsd)} hacim · {wholeUsd(token.liquidityUsd)} {chainId === "hyperliquid" ? "açık pozisyon" : "likidite"}</small></button><a className="gainer-dex-link" href={integrationMarketUrl(chainId, token.pairAddress)} target="_blank" rel="noreferrer" title={`${token.symbol} piyasa sayfasını aç`} aria-label={`${token.symbol} piyasa sayfasını aç`}><ExternalLink size={13} /></a></div>)}</div>
         <section className="discovery-results">
@@ -969,19 +967,19 @@ function TradesView({ data, onChanged, onNotice }: { data: DashboardSnapshot; on
       {selectedChainId && selectedNetworkName ? <div className="trade-network-content" key={selectedChainId}>{selectedChainId === "hyperliquid" ? <>
         <section className="trade-layout">
           <HypercoreManualTradeForm mode={data.mode} positions={hypercorePositions} limits={data.riskSettings.networkExecutionLimits!.hyperliquid} onChanged={onChanged} onNotice={onNotice} />
-          <div className="section-block"><div className="section-heading"><div><span className="eyebrow">HyperCore</span><h2>Açık spot ve perp pozisyonları</h2></div></div>{hypercorePositions.length ? <HypercorePositionList positions={hypercorePositions} /> : <EmptyState icon={CircleDollarSign} title="HyperCore pozisyonu yok" body={`Manuel emir veya takip edilen cüzdan fill'i burada bir ${data.mode} pozisyon açar.`} />}</div>
+          <div className="section-block"><div className="section-heading"><div><span className="eyebrow">HyperCore</span><h2>Açık spot ve perp pozisyonları</h2></div></div>{hypercorePositions.length ? <HypercorePositionList positions={hypercorePositions} marketLinkLeading /> : <EmptyState icon={CircleDollarSign} title="HyperCore pozisyonu yok" body={`Manuel emir veya takip edilen cüzdan fill'i burada bir ${data.mode} pozisyon açar.`} />}</div>
         </section>
-        <section className="table-panel"><div className="table-toolbar"><div><h3>HyperCore işlem geçmişi</h3><span>{data.mode === "paper" ? data.hypercoreTrades.length : selectedAttempts.length} kayıt</span></div></div>{data.mode === "paper" ? data.hypercoreTrades.length ? <HypercoreTradeTable trades={data.hypercoreTrades} /> : <EmptyState icon={Activity} title="Henüz HyperCore işlemi yok" body="Spot ve perpetual paper fill'leri burada ayrıntılı görünür." /> : selectedAttempts.length ? <ExecutionAttemptTable attempts={selectedAttempts} /> : <EmptyState icon={Activity} title={`Henüz HyperCore ${data.mode} işlemi yok`} body="İlk emir simülasyonu burada quote ve maliyet ayrıntılarıyla görünür." />}</section>
+        <section className="table-panel"><div className="table-toolbar"><div><h3>HyperCore işlem geçmişi</h3><span>{data.mode === "paper" ? data.hypercoreTrades.length : selectedAttempts.length} kayıt</span></div></div>{data.mode === "paper" ? data.hypercoreTrades.length ? <HypercoreTradeTable trades={data.hypercoreTrades} /> : <EmptyState icon={Activity} title="Henüz HyperCore işlemi yok" body="Spot ve perpetual paper fill'leri burada ayrıntılı görünür." /> : selectedAttempts.length ? <ExecutionAttemptTable attempts={selectedAttempts} wallets={data.wallets} /> : <EmptyState icon={Activity} title={`Henüz HyperCore ${data.mode} işlemi yok`} body="İlk emir simülasyonu burada quote ve maliyet ayrıntılarıyla görünür." />}</section>
       </> : <>
         <section className="trade-layout">
           <ManualTradeForm key={`${selectedChainId}:${tradeSelection?.version ?? 0}`} lockedChainId={selectedChainId} mode={data.mode} positions={selectedPositions} initialPosition={tradeSelection?.position ?? null} riskSettings={data.riskSettings} onChanged={onChanged} onNotice={onNotice} />
           <div className="section-block"><div className="section-heading"><div><span className="eyebrow">{selectedNetworkName}</span><h2>Açık pozisyonlar</h2></div></div>{selectedPositions.length ? <GroupedPositionList positions={selectedPositions} lots={data.mode === "paper" ? selectedLots : []} onSelect={selectPosition} /> : <EmptyState icon={CircleDollarSign} title={`${selectedNetworkName} pozisyonu yok`} body={`${data.mode} alım yaptığında pozisyon burada görünecek.`} />}</div>
         </section>
-        <section className="table-panel"><div className="table-toolbar"><div><h3>{selectedNetworkName} işlem geçmişi</h3><span>{data.mode === "paper" ? selectedTrades.length : selectedAttempts.length} kayıt</span></div></div>{data.mode === "paper" ? selectedTrades.length ? <TradeTable trades={selectedTrades} /> : <EmptyState icon={Activity} title={`Henüz ${selectedNetworkName} işlemi yok`} body="İlk işlemin bütün maliyetleriyle burada listelenecek." /> : selectedAttempts.length ? <ExecutionAttemptTable attempts={selectedAttempts} /> : <EmptyState icon={Activity} title={`Henüz ${selectedNetworkName} ${data.mode} işlemi yok`} body="İlk emir simülasyonu burada quote ve maliyet ayrıntılarıyla görünür." />}</section>
+        <section className="table-panel"><div className="table-toolbar"><div><h3>{selectedNetworkName} işlem geçmişi</h3><span>{data.mode === "paper" ? selectedTrades.length : selectedAttempts.length} kayıt</span></div></div>{data.mode === "paper" ? selectedTrades.length ? <TradeTable trades={selectedTrades} /> : <EmptyState icon={Activity} title={`Henüz ${selectedNetworkName} işlemi yok`} body="İlk işlemin bütün maliyetleriyle burada listelenecek." /> : selectedAttempts.length ? <ExecutionAttemptTable attempts={selectedAttempts} wallets={data.wallets} /> : <EmptyState icon={Activity} title={`Henüz ${selectedNetworkName} ${data.mode} işlemi yok`} body="İlk emir simülasyonu burada quote ve maliyet ayrıntılarıyla görünür." />}</section>
       </>}</div> : <div className="trade-network-content" key="all">
-        {activePositionCount > 0 && <div className="section-block"><div className="section-heading"><div><span className="eyebrow">Tüm ağlar</span><h2>Açık pozisyonlar</h2></div><span>{activePositionCount} açık pozisyon</span></div><div className="all-network-positions">{evmPositions.length > 0 && <GroupedPositionList positions={evmPositions} lots={data.mode === "paper" ? data.positionLots : []} onSelect={(position) => { selectNetwork(position.chainId); selectPosition(position); }} />}{hypercorePositions.length > 0 && <section className="position-group"><header><div><span aria-hidden="true" className="position-group-mark hyperliquid" /><strong>Hyperliquid</strong></div><span>{hypercorePositions.length} açık pozisyon</span></header><HypercorePositionList positions={hypercorePositions} /></section>}</div></div>}
+        {activePositionCount > 0 && <div className="section-block"><div className="section-heading"><div><span className="eyebrow">Tüm ağlar</span><h2>Açık pozisyonlar</h2></div><span>{activePositionCount} açık pozisyon</span></div><div className="all-network-positions">{evmPositions.length > 0 && <GroupedPositionList positions={evmPositions} lots={data.mode === "paper" ? data.positionLots : []} onSelect={(position) => { selectNetwork(position.chainId); selectPosition(position); }} />}{hypercorePositions.length > 0 && <section className="position-group"><header><div><span aria-hidden="true" className="position-group-mark hyperliquid" /><strong>Hyperliquid</strong></div><span>{hypercorePositions.length} açık pozisyon</span></header><HypercorePositionList positions={hypercorePositions} marketLinkLeading /></section>}</div></div>}
         {data.mode === "paper" ? <><section className="table-panel"><div className="table-toolbar"><div><h3>EVM ve Solana işlem geçmişi</h3><span>{data.trades.length} kayıt</span></div></div>{data.trades.length ? <TradeTable trades={data.trades} /> : <EmptyState icon={Activity} title="Henüz EVM veya Solana işlemi yok" body="İlk işlemin bütün maliyetleriyle burada listelenecek." />}</section>
-        <section className="table-panel"><div className="table-toolbar"><div><h3>HyperCore işlem geçmişi</h3><span>{data.hypercoreTrades.length} kayıt</span></div></div>{data.hypercoreTrades.length ? <HypercoreTradeTable trades={data.hypercoreTrades} /> : <EmptyState icon={Activity} title="Henüz HyperCore işlemi yok" body="Spot ve perpetual paper fill'leri burada ayrıntılı görünür." />}</section></> : <section className="table-panel"><div className="table-toolbar"><div><h3>{data.mode === "shadow" ? "Shadow gerçekleşebilirlik kayıtları" : "Canlı execution kayıtları"}</h3><span>{totalTradeCount} kayıt</span></div></div>{totalTradeCount ? <ExecutionAttemptTable attempts={data.executionAttempts.filter((attempt) => attempt.mode === data.mode)} /> : <EmptyState icon={Activity} title={`Henüz ${data.mode} işlemi yok`} body="İlk emir bütün quote, maliyet ve simülasyon ayrıntılarıyla burada listelenecek." />}</section>}
+        <section className="table-panel"><div className="table-toolbar"><div><h3>HyperCore işlem geçmişi</h3><span>{data.hypercoreTrades.length} kayıt</span></div></div>{data.hypercoreTrades.length ? <HypercoreTradeTable trades={data.hypercoreTrades} /> : <EmptyState icon={Activity} title="Henüz HyperCore işlemi yok" body="Spot ve perpetual paper fill'leri burada ayrıntılı görünür." />}</section></> : <section className="table-panel"><div className="table-toolbar"><div><h3>{data.mode === "shadow" ? "Shadow gerçekleşebilirlik kayıtları" : "Canlı execution kayıtları"}</h3><span>{totalTradeCount} kayıt</span></div></div>{totalTradeCount ? <ExecutionAttemptTable attempts={data.executionAttempts.filter((attempt) => attempt.mode === data.mode)} wallets={data.wallets} /> : <EmptyState icon={Activity} title={`Henüz ${data.mode} işlemi yok`} body="İlk emir bütün quote, maliyet ve simülasyon ayrıntılarıyla burada listelenecek." />}</section>}
       </div>}
     </div>
   );
@@ -1001,7 +999,8 @@ function executionEvmPositions(data: DashboardSnapshot): Position[] {
     const openedAt = lots.reduce((earliest, lot) => lot.openedAt < earliest ? lot.openedAt : earliest, lots[0].openedAt);
     return {
     id: `execution:${key}`, chainId: lots[0].integrationId, tokenAddress: lots[0].assetKey,
-    tokenSymbol: lots[0].assetSymbol || `${lots[0].assetKey.slice(0, 6)}…${lots[0].assetKey.slice(-4)}`, pairAddress: null,
+    tokenSymbol: lots[0].assetSymbol || `${lots[0].assetKey.slice(0, 6)}…${lots[0].assetKey.slice(-4)}`,
+    pairAddress: lots.find((lot) => lot.pairAddress)?.pairAddress ?? lots[0].assetKey,
     sourceWalletId: lots.length === 1 ? lots[0].walletId : null,
     sourceWalletLabel: walletLabels.join(", ") || null,
     sourceWalletLabels: walletLabels,
@@ -1213,7 +1212,14 @@ function ManualTradeForm({ mode, positions, initialPosition, lockedChainId, risk
     try {
       const response = await fetch("/api/trades/manual", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chainId, side, tokenAddress, allocationPercent: side === "buy" ? allocationPercent : undefined, sellPercent: side === "sell" ? sellPercent : undefined, slippagePercent, requestId: crypto.randomUUID() }) });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? result.trade?.reason ?? "İşlem tamamlanamadı.");
+      if (!response.ok) {
+        const message = typeof result.error === "string" && result.error.trim()
+          ? result.error.trim()
+          : typeof result.trade?.reason === "string" && result.trade.reason.trim()
+            ? result.trade.reason.trim()
+            : "İşlem tamamlanamadı; execution kaydındaki hata ayrıntılarını kontrol edin.";
+        throw new Error(message);
+      }
       const tokenSymbol = tokenQuote?.symbol ?? selectedSellPosition?.tokenSymbol ?? "Token";
       onChanged(); onNotice({ type: "success", message: `${tokenSymbol} ${mode === "paper" ? "paper" : mode === "shadow" ? "shadow" : "canlı"} ${side === "buy" ? "alımı" : "satışı"} tamamlandı.` });
       setQuoteVersion((value) => value + 1);
@@ -2011,6 +2017,8 @@ function RiskView({ data, onChanged, onNotice }: { data: DashboardSnapshot; onCh
         <RiskGroup title="Cüzdan işlem yoğunluğu" description="Aşırı aktif kaynakları otomatik izleme dışına alır" icon={Activity}>
           <NumberField label="Saatlik swap sınırı" value={form.maxWalletSwapsPerHour ?? 8} onChange={(value) => update("maxWalletSwapsPerHour", value)} />
           <NumberField label="24 saatlik swap sınırı" value={form.maxWalletSwapsPer24Hours ?? 50} onChange={(value) => update("maxWalletSwapsPer24Hours", value)} />
+          <NumberField label="HyperCore saatlik fill sınırı" value={form.hypercoreMaxWalletFillsPerHour ?? 20} onChange={(value) => update("hypercoreMaxWalletFillsPerHour", value)} />
+          <NumberField label="HyperCore 24 saatlik fill sınırı" value={form.hypercoreMaxWalletFillsPer24Hours ?? 100} onChange={(value) => update("hypercoreMaxWalletFillsPer24Hours", value)} />
         </RiskGroup>
         <RiskGroup title="Maruziyet" description="Tek token ve kaynak cüzdan yoğunluğu" icon={Gauge}>
           <NumberField label="Token başına üst sınır" suffix="%" value={form.maxTokenExposurePercent} onChange={(value) => update("maxTokenExposurePercent", value)} />
@@ -2061,7 +2069,7 @@ function StatusBadge({ status }: { status: BotStatus }) {
   return <span className={`status-badge ${status}`}><i />{labels[status]}</span>;
 }
 
-function WalletTable({ wallets, pnlByWallet, onChanged, onNotice }: { wallets: TrackedWallet[]; pnlByWallet?: Map<string, WalletNetworkPnl>; onChanged: () => void; onNotice: (value: { type: "success" | "error"; message: string }) => void }) {
+function WalletTable({ wallets, chainId, pnlByWallet, onChanged, onNotice }: { wallets: TrackedWallet[]; chainId: ChainId; pnlByWallet: Map<string, WalletNetworkPnl>; onChanged: () => void; onNotice: (value: { type: "success" | "error"; message: string }) => void }) {
   const [selected, setSelected] = useState<TrackedWallet | null>(null);
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
@@ -2115,7 +2123,9 @@ function WalletTable({ wallets, pnlByWallet, onChanged, onNotice }: { wallets: T
       if (!response.ok) throw new Error(result.error ?? "Cüzdan favori durumu değiştirilemedi.");
       if (selected?.id === wallet.id) setSelected(result.wallet);
       onChanged();
-      onNotice({ type: "success", message: `${wallet.label} ${isFavorite ? "favorilere eklendi" : "favorilerden çıkarıldı"}.` });
+      onNotice({ type: "success", message: isFavorite
+        ? `${wallet.label} yıldızlandı; uyumlu tüm ağlarda takip ve copy trade etkinleştirildi.`
+        : `${wallet.label} yıldızdan çıkarıldı; yalnızca önceden seçilen ağlarda izlenecek.` });
     } catch (error) {
       onNotice({ type: "error", message: error instanceof Error ? error.message : "Cüzdan favori durumu değiştirilemedi." });
     } finally {
@@ -2157,25 +2167,25 @@ function WalletTable({ wallets, pnlByWallet, onChanged, onNotice }: { wallets: T
           <th aria-label="İşlemler" />
         </tr></thead>
         <tbody>{sortedWallets.map((wallet) => {
-          const pnlMetric = pnlByWallet?.get(wallet.id);
-          const pnlUsd = pnlMetric?.pnlUsd ?? wallet.realizedPnlUsd;
-          const investedUsd = pnlMetric?.investedUsd ?? walletCopyInvestedUsd(wallet);
+          const pnlMetric = pnlByWallet.get(wallet.id) ?? { pnlUsd: 0, investedUsd: 0 };
+          const pnlUsd = pnlMetric.pnlUsd;
+          const investedUsd = pnlMetric.investedUsd;
           const pnlPercent = investedUsd > 0 ? pnlUsd / investedUsd * 100 : 0;
           return <tr key={wallet.id}>
           <td data-label="Cüzdan"><button className="wallet-cell wallet-cell-button" onClick={() => setSelected(wallet)} title={`${wallet.label} eklenme ve skor detaylarını aç`}><span className="wallet-avatar">{wallet.label.slice(0, 2).toUpperCase()}</span><span><strong>{wallet.label}</strong><code>{shortAddress(wallet.address)}</code></span></button></td>
-          <td data-label="Ağlar"><WalletNetworkBadges chainIds={wallet.trackedChainIds} /></td>
+          <td data-label="Ağlar"><WalletNetworkBadges chainIds={effectiveWalletChainIds(wallet)} global={wallet.isFavorite} /></td>
           <td data-label="Takip durumu"><WalletTrackingState wallet={wallet} compact /></td>
           <td data-label="Skor"><div className="score-cell"><span>{wallet.score}</span><div><i style={{ width: `${wallet.score}%` }} /></div></div></td>
           <td data-label="Gözlenen">{wallet.totalTrades}</td>
           <td data-label="Copy trade">{wallet.copiedTradeCount}</td>
           <td data-label="Kazanma">%{wallet.winRate.toFixed(1)}</td>
           <td data-label="Net PnL" className={pnlUsd >= 0 ? "positive-text" : "negative-text"} title={`Seçili ağdaki gerçekleşmiş copy sonucu + açık copy pozisyonların güncel değeri − kalan maliyetler · hesaplanan sermaye ${usd(investedUsd)}`}><strong>{signedUsd(pnlUsd)}</strong><br/><small>{`${pnlPercent >= 0 ? "+" : ""}%${pnlPercent.toFixed(2)}`}</small></td>
-          <td data-label="İşlemler"><div className="row-actions"><button className={`row-action favorite ${wallet.isFavorite ? "active" : ""}`} disabled={removingId !== null || updatingId !== null || favoriteUpdatingId !== null} onClick={() => void toggleFavorite(wallet)} title={wallet.isFavorite ? `${wallet.label} favorilerden çıkar` : `${wallet.label} favorilere ekle`} aria-label={wallet.isFavorite ? `${wallet.label} favorilerden çıkar` : `${wallet.label} favorilere ekle`} aria-pressed={wallet.isFavorite}>{favoriteUpdatingId === wallet.id ? <RefreshCw size={15} className="spin" /> : <Star size={15} fill={wallet.isFavorite ? "currentColor" : "none"} />}</button><button className="row-action wallet-detail-action" onClick={() => setSelected(wallet)} title={`${wallet.label} skor detayını aç`}><Eye size={15} /></button><button className={`row-action toggle ${wallet.state === "paused" ? "resume" : ""}`} disabled={removingId !== null || updatingId !== null || favoriteUpdatingId !== null} onClick={() => void toggleWallet(wallet)} title={wallet.state === "paused" ? `${wallet.label} takibini başlat` : `${wallet.label} takibini durdur`} aria-label={wallet.state === "paused" ? `${wallet.label} takibini başlat` : `${wallet.label} takibini durdur`}>{updatingId === wallet.id ? <RefreshCw size={15} className="spin" /> : wallet.state === "paused" ? <PlayCircle size={15} /> : <PauseCircle size={15} />}</button><button className={`row-action remove ${confirmRemoveId === wallet.id ? "confirm" : ""}`} disabled={removingId !== null || updatingId !== null || favoriteUpdatingId !== null} onClick={() => void removeWallet(wallet)} title={confirmRemoveId === wallet.id ? `${wallet.label} takibini bırakmayı onayla` : `${wallet.label} takibini bırak`} aria-label={confirmRemoveId === wallet.id ? `${wallet.label} takibini bırakmayı onayla` : `${wallet.label} takibini bırak`}>{removingId === wallet.id ? <RefreshCw size={15} className="spin" /> : confirmRemoveId === wallet.id ? <CheckCircle2 size={15} /> : <Trash2 size={15} />}</button></div></td>
+          <td data-label="İşlemler"><div className="row-actions"><button className={`row-action favorite ${wallet.isFavorite ? "active" : ""}`} disabled={removingId !== null || updatingId !== null || favoriteUpdatingId !== null} onClick={() => void toggleFavorite(wallet)} title={wallet.isFavorite ? `${wallet.label} için tüm ağ takibini kapat` : `${wallet.label} cüzdanını uyumlu tüm ağlarda takip et`} aria-label={wallet.isFavorite ? `${wallet.label} için tüm ağ takibini kapat` : `${wallet.label} cüzdanını uyumlu tüm ağlarda takip et`} aria-pressed={wallet.isFavorite}>{favoriteUpdatingId === wallet.id ? <RefreshCw size={15} className="spin" /> : <Star size={15} fill={wallet.isFavorite ? "currentColor" : "none"} />}</button><button className="row-action wallet-detail-action" onClick={() => setSelected(wallet)} title={`${wallet.label} skor detayını aç`}><Eye size={15} /></button><button className={`row-action toggle ${wallet.state === "paused" ? "resume" : ""}`} disabled={removingId !== null || updatingId !== null || favoriteUpdatingId !== null} onClick={() => void toggleWallet(wallet)} title={wallet.state === "paused" ? `${wallet.label} takibini başlat` : `${wallet.label} takibini durdur`} aria-label={wallet.state === "paused" ? `${wallet.label} takibini başlat` : `${wallet.label} takibini durdur`}>{updatingId === wallet.id ? <RefreshCw size={15} className="spin" /> : wallet.state === "paused" ? <PlayCircle size={15} /> : <PauseCircle size={15} />}</button><button className={`row-action remove ${confirmRemoveId === wallet.id ? "confirm" : ""}`} disabled={removingId !== null || updatingId !== null || favoriteUpdatingId !== null} onClick={() => void removeWallet(wallet)} title={confirmRemoveId === wallet.id ? `${wallet.label} takibini bırakmayı onayla` : `${wallet.label} takibini bırak`} aria-label={confirmRemoveId === wallet.id ? `${wallet.label} takibini bırakmayı onayla` : `${wallet.label} takibini bırak`}>{removingId === wallet.id ? <RefreshCw size={15} className="spin" /> : confirmRemoveId === wallet.id ? <CheckCircle2 size={15} /> : <Trash2 size={15} />}</button></div></td>
         </tr>;
         })}</tbody>
       </table>
     </div>
-    {selected && <WalletDetail wallet={selected} onClose={() => setSelected(null)} onChanged={onChanged} onNotice={onNotice} />}
+    {selected && <WalletDetail wallet={selected} chainId={chainId} pnl={pnlByWallet.get(selected.id) ?? { pnlUsd: 0, investedUsd: 0 }} onClose={() => setSelected(null)} onChanged={onChanged} onNotice={onNotice} />}
   </>;
 }
 
@@ -2187,7 +2197,7 @@ function SortableWalletHeader({ label, column, activeColumn, direction, onSort, 
   return <th aria-sort={active ? direction === "desc" ? "descending" : "ascending" : "none"} title={title}><button className={`table-sort ${active ? "active" : ""}`} onClick={() => onSort(column)} title={`${label} sütununu ${active && direction === "desc" ? "küçükten büyüğe" : "büyükten küçüğe"} sırala`}>{label}{active && direction === "asc" ? <ArrowUp size={12} /> : <ArrowDown size={12} />}</button></th>;
 }
 
-function compareWalletRows(left: TrackedWallet, right: TrackedWallet, key: WalletSortKey, direction: SortDirection, pnlByWallet?: Map<string, WalletNetworkPnl>) {
+function compareWalletRows(left: TrackedWallet, right: TrackedWallet, key: WalletSortKey, direction: SortDirection, pnlByWallet: Map<string, WalletNetworkPnl>) {
   const pausedOrder = Number(left.state === "paused") - Number(right.state === "paused");
   if (pausedOrder) return pausedOrder;
   const favoriteOrder = Number(right.isFavorite) - Number(left.isFavorite);
@@ -2195,13 +2205,13 @@ function compareWalletRows(left: TrackedWallet, right: TrackedWallet, key: Walle
   const stateRank = { active: 2, observing: 1, paused: 0 } as const;
   const values = {
     wallet: [left.label, right.label],
-    networks: [left.trackedChainIds.map(integrationName).join(", "), right.trackedChainIds.map(integrationName).join(", ")],
+    networks: [effectiveWalletChainIds(left).map(integrationName).join(", "), effectiveWalletChainIds(right).map(integrationName).join(", ")],
     state: [stateRank[left.state], stateRank[right.state]],
     score: [left.score, right.score],
     observed: [left.totalTrades, right.totalTrades],
     copied: [left.copiedTradeCount, right.copiedTradeCount],
     winRate: [left.winRate, right.winRate],
-    pnl: [pnlByWallet?.get(left.id)?.pnlUsd ?? left.realizedPnlUsd, pnlByWallet?.get(right.id)?.pnlUsd ?? right.realizedPnlUsd],
+    pnl: [pnlByWallet.get(left.id)?.pnlUsd ?? 0, pnlByWallet.get(right.id)?.pnlUsd ?? 0],
   }[key] as [string | number, string | number];
   const comparison = typeof values[0] === "string"
     ? values[0].localeCompare(values[1] as string, uiLocale(), { sensitivity: "base" })
@@ -2210,11 +2220,11 @@ function compareWalletRows(left: TrackedWallet, right: TrackedWallet, key: Walle
   return sorted || right.score - left.score || left.address.localeCompare(right.address);
 }
 
-function WalletNetworkBadges({ chainIds }: { chainIds: ChainId[] }) {
-  return <div className="wallet-networks">{chainIds.map((chainId) => {
+function WalletNetworkBadges({ chainIds, global = false }: { chainIds: ChainId[]; global?: boolean }) {
+  return <div className="wallet-networks" title={global ? "Yıldızlı cüzdan: uyumlu tüm ağlarda takip ediliyor" : undefined}>{chainIds.map((chainId) => {
     const integration = INTEGRATION_CATALOG[chainId];
     return <span className={chainId} key={chainId}>{integration.shortName}{integration.shortName !== integration.name && <small>{integration.name}</small>}</span>;
-  })}</div>;
+  })}{global && <span className="global"><Star size={11} fill="currentColor" /> Tümü</span>}</div>;
 }
 
 function WalletTrackingState({ wallet, compact = false }: { wallet: TrackedWallet; compact?: boolean }) {
@@ -2232,8 +2242,8 @@ function WalletTrackingState({ wallet, compact = false }: { wallet: TrackedWalle
   return <div className={`wallet-tracking-state ${wallet.state}`}><i /><div><strong>{label}</strong><p>{paused ? "Bu cüzdanın yeni işlemleri izlenmiyor ve copy trade yapılmıyor." : active ? "Yeni swaplar izleniyor; risk kurallarını geçen işlemler copy trade ediliyor." : "Yeni swaplar izleniyor ve risk kurallarını geçen işlemler copy trade ediliyor; cüzdan geçmişi toplanmaya devam ediyor."}</p></div></div>;
 }
 
-function PositionList({ positions, lots = [], onSelect, usdFormatter = usd }: { positions: Position[]; lots?: DashboardSnapshot["positionLots"]; onSelect?: (position: Position) => void; usdFormatter?: (value: number) => string }) {
-  return <div className={`position-list ${onSelect ? "selectable" : ""}`}>{positions.map((position) => { const pnlPercent = position.investedUsd ? (position.unrealizedPnlUsd / position.investedUsd) * 100 : 0; const matchingLots = lots.filter((lot) => lot.chainId === position.chainId && lot.tokenAddress.toLowerCase() === position.tokenAddress.toLowerCase()); const lotCount = matchingLots.length; const lotLabels = [...new Set(matchingLots.map((lot) => lot.walletLabel).filter((label): label is string => Boolean(label)))]; const sourceLabels = position.sourceWalletLabels?.length ? position.sourceWalletLabels : lotLabels.length ? lotLabels : position.sourceWalletLabel ? [position.sourceWalletLabel] : []; const openedAt = position.openedAt ?? matchingLots.reduce<string | null>((earliest, lot) => !earliest || lot.openedAt < earliest ? lot.openedAt : earliest, null); const content = <><div className={`token-icon ${position.chainId}`}>{position.tokenSymbol.slice(0, 2)}</div><div className="position-main"><strong>{position.tokenSymbol}</strong><small className="position-source">Kaynak: {sourceLabels.join(", ") || "Manuel işlem"}{lotCount > 1 ? ` · ${lotCount} açık lot` : ""}</small><small className="position-opened">Alındı: {openedAt ? dateTime(openedAt) : "Kayıt bulunamadı"}</small><span>{integrationName(position.chainId)} · {position.quantity.toFixed(4)}</span></div><div className="position-value"><strong>{usdFormatter(position.quantity * position.currentPriceUsd)}</strong><span className={pnlPercent >= 0 ? "positive-text" : "negative-text"}>{pnlPercent >= 0 ? "+" : ""}{pnlPercent.toFixed(2)}%</span></div></>; return <div className="position-row-shell" key={position.id}>{onSelect ? <button type="button" className="position-row" onClick={() => onSelect(position)} title={`${position.tokenSymbol} işlem formuna aktar`}>{content}<ChevronRight className="position-chevron" size={16} /></button> : <div className="position-row">{content}</div>}{position.pairAddress && <a className="position-dex-link" href={integrationMarketUrl(position.chainId, position.pairAddress)} target="_blank" rel="noreferrer" title={`${position.tokenSymbol} tokenını DexScreener'da aç`} aria-label={`${position.tokenSymbol} tokenını DexScreener'da aç`}><ExternalLink size={14} /></a>}</div>; })}</div>;
+function PositionList({ positions, lots = [], onSelect, usdFormatter = usd, marketLinkLeading = false }: { positions: Position[]; lots?: DashboardSnapshot["positionLots"]; onSelect?: (position: Position) => void; usdFormatter?: (value: number) => string; marketLinkLeading?: boolean }) {
+  return <div className={`position-list ${onSelect ? "selectable" : ""}`}>{positions.map((position) => { const pnlPercent = position.investedUsd ? (position.unrealizedPnlUsd / position.investedUsd) * 100 : 0; const matchingLots = lots.filter((lot) => lot.chainId === position.chainId && lot.tokenAddress.toLowerCase() === position.tokenAddress.toLowerCase()); const lotCount = matchingLots.length; const lotLabels = [...new Set(matchingLots.map((lot) => lot.walletLabel).filter((label): label is string => Boolean(label)))]; const sourceLabels = position.sourceWalletLabels?.length ? position.sourceWalletLabels : lotLabels.length ? lotLabels : position.sourceWalletLabel ? [position.sourceWalletLabel] : []; const openedAt = position.openedAt ?? matchingLots.reduce<string | null>((earliest, lot) => !earliest || lot.openedAt < earliest ? lot.openedAt : earliest, null); const content = <><div className={`token-icon ${position.chainId}`}>{position.tokenSymbol.slice(0, 2)}</div><div className="position-main"><strong>{position.tokenSymbol}</strong><small className="position-source">Kaynak: {sourceLabels.join(", ") || "Manuel işlem"}{lotCount > 1 ? ` · ${lotCount} açık lot` : ""}</small><small className="position-opened">Alındı: {openedAt ? dateTime(openedAt) : "Kayıt bulunamadı"}</small><span>{integrationName(position.chainId)} · {position.quantity.toFixed(4)}</span></div><div className="position-value"><strong>{usdFormatter(position.quantity * position.currentPriceUsd)}</strong><span className={position.unrealizedPnlUsd >= 0 ? "positive-text" : "negative-text"}>{signedFormattedUsd(position.unrealizedPnlUsd, usdFormatter)} · {pnlPercent >= 0 ? "+" : ""}{pnlPercent.toFixed(2)}%</span></div></>; return <div className={`position-row-shell ${marketLinkLeading ? "market-link-leading" : ""}`} key={position.id}>{onSelect ? <button type="button" className="position-row" onClick={() => onSelect(position)} title={`${position.tokenSymbol} işlem formuna aktar`}>{content}<ChevronRight className="position-chevron" size={16} /></button> : <div className="position-row">{content}</div>}{position.pairAddress && <a className="position-dex-link" href={integrationMarketUrl(position.chainId, position.pairAddress)} target="_blank" rel="noreferrer" title={`${position.tokenSymbol} tokenını DexScreener'da aç`} aria-label={`${position.tokenSymbol} tokenını DexScreener'da aç`}><ExternalLink size={14} /></a>}</div>; })}</div>;
 }
 
 function GroupedPositionList({ positions, lots, onSelect }: { positions: Position[]; lots: DashboardSnapshot["positionLots"]; onSelect: (position: Position) => void }) {
@@ -2246,16 +2256,16 @@ function GroupedPositionList({ positions, lots, onSelect }: { positions: Positio
     const totalValueUsd = group.positions.reduce((sum, position) => sum + position.quantity * position.currentPriceUsd, 0);
     return <section className="position-group" key={group.chainId}>
       <header><div><span aria-hidden="true" className={`position-group-mark ${group.chainId}`} /><strong>{integrationName(group.chainId)}</strong></div><span>{group.positions.length} pozisyon · {usd(totalValueUsd)}</span></header>
-      <PositionList positions={group.positions} lots={lots} onSelect={onSelect} />
+      <PositionList positions={group.positions} lots={lots} onSelect={onSelect} marketLinkLeading />
     </section>;
   })}</div>;
 }
 
-function HypercorePositionList({ positions, usdFormatter = usd }: { positions: HypercorePaperPosition[]; usdFormatter?: (value: number) => string }) {
+function HypercorePositionList({ positions, usdFormatter = usd, marketLinkLeading = false }: { positions: HypercorePaperPosition[]; usdFormatter?: (value: number) => string; marketLinkLeading?: boolean }) {
   if (!positions.length) return null;
   return <div className="position-list hypercore-position-list">{positions.map((position) => {
     const pnlPercent = position.marginUsd ? position.unrealizedPnlUsd / position.marginUsd * 100 : 0;
-    return <div className="position-row-shell" key={position.id}><div className="position-row"><div className="token-icon hyperliquid">HL</div><div className="position-main"><strong>{position.coin} <small className={`market-tag ${position.side}`}>{position.marketType === "spot" ? "SPOT" : `${position.side.toUpperCase()} · ${position.leverage}x`}</small></strong><small className="position-source">Kaynak: {position.walletLabel ?? "Manuel işlem"}</small><small className="position-opened">Alındı: {dateTime(position.openedAt)}</small><span>{position.quantity.toFixed(6)} · giriş {usd(position.entryPriceUsd)}</span></div><div className="position-value"><strong>{usdFormatter(position.marginUsd + position.unrealizedPnlUsd)}</strong><span className={pnlPercent >= 0 ? "positive-text" : "negative-text"}>{pnlPercent >= 0 ? "+" : ""}{pnlPercent.toFixed(2)}%</span></div></div><a className="position-dex-link" href={integrationMarketUrl("hyperliquid", position.coin)} target="_blank" rel="noreferrer" title={`${position.coin} Hyperliquid piyasasını aç`}><ExternalLink size={14}/></a></div>;
+    return <div className={`position-row-shell ${marketLinkLeading ? "market-link-leading" : ""}`} key={position.id}><div className="position-row"><div className="token-icon hyperliquid">HL</div><div className="position-main"><strong>{position.coin} <small className={`market-tag ${position.side}`}>{position.marketType === "spot" ? "SPOT" : `${position.side.toUpperCase()} · ${position.leverage}x`}</small></strong><small className="position-source">Kaynak: {position.walletLabel ?? "Manuel işlem"}</small><small className="position-opened">Alındı: {dateTime(position.openedAt)}</small><span>{position.quantity.toFixed(6)} · giriş {usd(position.entryPriceUsd)}</span></div><div className="position-value"><strong>{usdFormatter(position.marginUsd + position.unrealizedPnlUsd)}</strong><span className={position.unrealizedPnlUsd >= 0 ? "positive-text" : "negative-text"}>{signedFormattedUsd(position.unrealizedPnlUsd, usdFormatter)} · {pnlPercent >= 0 ? "+" : ""}{pnlPercent.toFixed(2)}%</span></div></div><a className="position-dex-link" href={integrationMarketUrl("hyperliquid", position.coin)} target="_blank" rel="noreferrer" title={`${position.coin} Hyperliquid piyasasını aç`}><ExternalLink size={14}/></a></div>;
   })}</div>;
 }
 
@@ -2273,22 +2283,60 @@ function TradeTable({ trades }: { trades: Trade[] }) {
 }
 
 function HypercoreTradeTable({ trades }: { trades: DashboardSnapshot["hypercoreTrades"] }) {
-  return <div className="table-scroll"><table className="hypercore-trade-table"><thead><tr><th>Piyasa</th><th>Tür</th><th>Eylem</th><th>Notional</th><th>Margin</th><th>Fee</th><th>Net PnL</th><th>Zaman</th></tr></thead><tbody>{trades.map((trade) => <tr key={trade.id}><td><div className="trade-cell"><span className={trade.side}>{trade.side === "buy" ? <ArrowDownLeft size={15}/> : <ArrowUpRight size={15}/>}</span><div><strong>{trade.coin}</strong><small>{trade.source === "manual" ? "Manuel" : "Kopya"} · {trade.positionSide} · {trade.leverage}x</small></div></div></td><td><span className="market-tag">{trade.marketType.toUpperCase()}</span></td><td><span className={`trade-status ${trade.status}`}>{hypercoreActionLabel(trade.action)}</span></td><td>{usd(trade.notionalUsd)}</td><td>{usd(trade.marginUsd)}</td><td>{usd(trade.feeUsd + trade.fundingUsd)}</td><td className={trade.realizedPnlUsd >= 0 ? "positive-text" : "negative-text"}>{signedUsd(trade.realizedPnlUsd)}</td><td>{relativeTime(trade.createdAt)}</td></tr>)}</tbody></table></div>;
+  const [selected, setSelected] = useState<DashboardSnapshot["hypercoreTrades"][number] | null>(null);
+  return <><div className="table-scroll"><table className="hypercore-trade-table"><thead><tr><th>Piyasa</th><th>Tür</th><th>Eylem</th><th>Notional</th><th>Margin</th><th>Fee</th><th>Net PnL</th><th>Zaman</th><th aria-label="İşlemler" /></tr></thead><tbody>{trades.map((trade) => <tr key={trade.id}><td><div className="trade-cell"><span className={trade.side}>{trade.side === "buy" ? <ArrowDownLeft size={15}/> : <ArrowUpRight size={15}/>}</span><div><strong>{trade.coin}</strong><small>{trade.source === "manual" ? "Manuel" : "Kopya"} · {trade.positionSide} · {trade.leverage}x</small></div></div></td><td><span className="market-tag">{trade.marketType.toUpperCase()}</span></td><td><span className={`trade-status ${trade.status}`}>{hypercoreActionLabel(trade.action)}</span></td><td>{usd(trade.notionalUsd)}</td><td>{usd(trade.marginUsd)}</td><td>{usd(trade.feeUsd + trade.fundingUsd)}</td><td className={trade.realizedPnlUsd >= 0 ? "positive-text" : "negative-text"}>{signedUsd(trade.realizedPnlUsd)}</td><td>{relativeTime(trade.createdAt)}</td><td><button className="row-action" onClick={() => setSelected(trade)} title={`${trade.coin} işlem detayını aç`}><Eye size={15}/></button></td></tr>)}</tbody></table></div>{selected && <Modal title={`${selected.coin} ${hypercoreActionLabel(selected.action)}`} subtitle={`Hyperliquid · ${selected.marketType.toUpperCase()} · ${selected.positionSide}`} onClose={() => setSelected(null)}><div className="trade-detail-summary"><div><span>İşlem fiyatı</span><strong>{usd(selected.priceUsd)}</strong><small>{dateTime(selected.createdAt)}</small></div><div><span>İşlem değeri</span><strong>{usd(selected.notionalUsd)}</strong><small>{selected.quantity.toFixed(6)} {selected.coin}</small></div><div className={`trade-detail-pnl ${selected.realizedPnlUsd >= 0 ? "positive" : "negative"}`}><span>Gerçekleşen PnL</span><strong>{signedUsd(selected.realizedPnlUsd)}</strong><small>Fee ve funding dahil</small></div></div><div className="detail-grid"><DetailItem label="Margin" value={usd(selected.marginUsd)} /><DetailItem label="Kaldıraç" value={`${selected.leverage}x`} /><DetailItem label="İşlem ücreti" value={usd(selected.feeUsd)} /><DetailItem label="Funding" value={signedUsd(-selected.fundingUsd)} /></div>{selected.reason && <div className="decision-box"><span>İşlem açıklaması</span><p>{selected.reason}</p></div>}</Modal>}</>;
 }
 
-function ExecutionAttemptTable({ attempts }: { attempts: DashboardSnapshot["executionAttempts"] }) {
+function ExecutionAttemptTable({ attempts, wallets }: { attempts: DashboardSnapshot["executionAttempts"]; wallets: TrackedWallet[] }) {
   const [selected, setSelected] = useState<DashboardSnapshot["executionAttempts"][number] | null>(null);
   const selectedRentUsd = selected ? executionMetadataNumber(selected.metadata, "refundableRentDepositUsd") : 0;
+  const selectedTradeValueUsd = selected ? executionMetadataNumber(selected.metadata, "tradeValueUsd") : 0;
+  const selectedTokenQuantity = selected ? executionMetadataNumber(selected.metadata, "tokenQuantity") : 0;
+  const selectedMarketCapUsd = selected ? executionMetadataNumber(selected.metadata, "marketCapUsd") : 0;
+  const selectedLiquidityUsd = selected ? executionMetadataNumber(selected.metadata, "liquidityUsd") : 0;
+  const selectedVolumeUsd = selected ? executionMetadataNumber(selected.metadata, "volume24hUsd") : 0;
+  const selectedCostBasisUsd = selected ? executionMetadataNumber(selected.metadata, "costBasisUsd") : 0;
+  const selectedNetProceedsUsd = selected ? executionMetadataNumber(selected.metadata, "netProceedsUsd") : 0;
+  const selectedRealizedPnlUsd = selected ? executionMetadataNullableNumber(selected.metadata, "realizedPnlUsd") : null;
+  const selectedPnlPercent = selected ? executionMetadataNullableNumber(selected.metadata, "realizedPnlPercent") : null;
+  const selectedWalletLabel = selected
+    ? executionMetadataString(selected.metadata, "walletLabel") ?? wallets.find((wallet) => wallet.id === selected.walletId)?.label ?? (selected.source === "manual" ? "Manuel işlem" : "Kayıt bulunamadı")
+    : "";
+  const selectedIsBuy = selected ? selected.action === "buy" || selected.action === "open" : false;
   return <><div className="table-scroll"><table><thead><tr><th>Emir</th><th>Ağ</th><th>Durum</th><th>Birim fiyat / işlem</th><th>Slippage / etki</th><th>Maliyet</th><th>Simülasyon</th><th aria-label="İşlemler" /></tr></thead><tbody>{attempts.map((attempt) => {
     const tradeValueUsd = executionMetadataNumber(attempt.metadata, "tradeValueUsd");
     return <tr key={attempt.id}><td><div className="trade-cell"><span className={attempt.action === "buy" || attempt.action === "open" ? "buy" : "sell"}>{attempt.action === "buy" || attempt.action === "open" ? <ArrowDownLeft size={15}/> : <ArrowUpRight size={15}/>}</span><div><strong>{attempt.asset}</strong><small>{attempt.source === "copy" ? "Kopya" : attempt.source === "manual" ? "Manuel" : "Sertifikasyon"} · {attempt.action}</small></div></div></td><td>{integrationName(attempt.integrationId)}</td><td><span className={`trade-status ${attempt.reconciliationStatus === "passed" ? "confirmed" : attempt.status}`}>{executionAttemptStatusLabel(attempt)}</span></td><td><div><strong>{attempt.quotedPriceUsd > 0 ? usd(attempt.quotedPriceUsd) : "—"}</strong>{tradeValueUsd > 0 && <small>{preciseUsd(tradeValueUsd)} işlem</small>}</div></td><td>%{attempt.slippagePercent.toFixed(2)} / %{attempt.priceImpactPercent.toFixed(2)}</td><td title={`Ağ: ${preciseUsd(attempt.networkFeeUsd)} · DEX: ${preciseUsd(attempt.dexFeeUsd)}`}>{preciseUsd(attempt.networkFeeUsd + attempt.dexFeeUsd)}</td><td>{attempt.simulationLatencyMs ? `${attempt.simulationLatencyMs} ms` : "—"}</td><td><button className="row-action" onClick={() => setSelected(attempt)} title="Execution ayrıntısını aç"><Eye size={15}/></button></td></tr>;
-  })}</tbody></table></div>{selected && <Modal title={`${selected.asset} execution kaydı`} subtitle={`${integrationName(selected.integrationId)} · ${selected.mode}`} onClose={() => setSelected(null)}><div className="detail-grid"><DetailItem label="Durum" value={executionAttemptStatusLabel(selected)} /><DetailItem label="Yerel muhasebe" value={executionAttemptWasNotSubmitted(selected) ? "Gerekmedi" : selected.accountingStatus === "applied" ? "Uygulandı" : "Bekliyor"} /><DetailItem label="Mutabakat" value={executionAttemptWasNotSubmitted(selected) ? "Gerekmedi" : selected.reconciliationStatus === "passed" ? "Geçti" : selected.reconciliationStatus === "failed" ? "Başarısız" : "Bekliyor"} /><DetailItem label="Ağ referansı" value={selected.txHash ?? selected.externalOrderId ?? "—"} /><DetailItem label="Birim fiyat" value={selected.quotedPriceUsd ? usd(selected.quotedPriceUsd) : "—"} /><DetailItem label="İşlem değeri" value={executionMetadataNumber(selected.metadata, "tradeValueUsd") ? preciseUsd(executionMetadataNumber(selected.metadata, "tradeValueUsd")) : "—"} /><DetailItem label="Beklenen çıktı" value={selected.expectedAmountOut ?? "—"} /><DetailItem label="Minimum çıktı" value={selected.minimumAmountOut ?? "—"} /><DetailItem label="Ağ maliyeti" value={preciseUsd(selected.networkFeeUsd)} /><DetailItem label="DEX maliyeti" value={preciseUsd(selected.dexFeeUsd)} />{selectedRentUsd > 0 && <DetailItem label="İade edilebilir hesap kirası" value={`${preciseUsd(selectedRentUsd)} · fee değildir`} />}<DetailItem label="Slippage" value={`%${selected.slippagePercent.toFixed(3)}`} /><DetailItem label="Fiyat etkisi" value={`%${selected.priceImpactPercent.toFixed(3)}`} /><DetailItem label="Hazırlama bakiyesi" value={usd(selected.availableBalanceUsd)} /><DetailItem label="Simülasyon süresi" value={`${selected.simulationLatencyMs} ms`} /></div>{selected.reconciliationDetails && <div className="decision-box"><span>Mutabakat sonucu</span><p>{selected.reconciliationDetails}</p></div>}{selected.errorMessage && <div className="decision-box"><span>Hata</span><p>{selected.errorMessage}</p></div>}<div className="decision-box"><span>Idempotency anahtarı</span><p className="mono">{selected.idempotencyKey}</p></div><div className="decision-box"><span>Teknik metadata</span><p className="mono">{JSON.stringify(selected.metadata)}</p></div></Modal>}</>;
+  })}</tbody></table></div>{selected && <Modal title={`${selected.asset} ${selectedIsBuy ? "alımı" : "satışı"}`} subtitle={`${integrationName(selected.integrationId)} · ${selected.source === "copy" ? `Kopya işlem · ${selectedWalletLabel}` : selected.source === "manual" ? "Manuel işlem" : "Sertifikasyon işlemi"}`} onClose={() => setSelected(null)}>
+    <div className="trade-detail-summary">
+      <div><span>{selectedIsBuy ? "Alım fiyatı" : "Satış fiyatı"}</span><strong>{selected.quotedPriceUsd > 0 ? preciseUsd(selected.quotedPriceUsd) : "—"}</strong><small>{dateTime(selected.confirmedAt ?? selected.createdAt)}</small></div>
+      <div><span>İşlem değeri</span><strong>{selectedTradeValueUsd > 0 ? preciseUsd(selectedTradeValueUsd) : "—"}</strong><small>{selectedTokenQuantity > 0 ? `${selectedTokenQuantity.toLocaleString(uiLocale(), { maximumFractionDigits: 8 })} token` : "Miktar kaydı yok"}</small></div>
+      <div className={`trade-detail-pnl ${selectedRealizedPnlUsd === null || selectedRealizedPnlUsd >= 0 ? "positive" : "negative"}`}><span>{selectedIsBuy ? "İşlem durumu" : "Gerçekleşen PnL"}</span><strong>{selectedIsBuy ? executionAttemptStatusLabel(selected) : selectedRealizedPnlUsd === null ? "Kayıt yok" : signedUsd(selectedRealizedPnlUsd)}</strong><small>{selectedIsBuy ? `${preciseUsd(selected.networkFeeUsd + selected.dexFeeUsd)} toplam maliyet` : selectedPnlPercent === null ? "Eski kayıtta PnL kırılımı yok" : signedPercent(selectedPnlPercent)}</small></div>
+    </div>
+    <h4 className="detail-heading">İşlem bilgileri</h4>
+    <div className="detail-grid"><DetailItem label="Ağ" value={integrationName(selected.integrationId)} /><DetailItem label="Tarih" value={dateTime(selected.confirmedAt ?? selected.createdAt)} /><DetailItem label="Kaynak" value={selectedWalletLabel} /><DetailItem label="Durum" value={executionAttemptStatusLabel(selected)} /><DetailItem label="Market cap" value={selectedMarketCapUsd > 0 ? compactUsd(selectedMarketCapUsd) : "Kayıt yok"} /><DetailItem label="Likidite" value={selectedLiquidityUsd > 0 ? compactUsd(selectedLiquidityUsd) : "Kayıt yok"} /><DetailItem label="24s hacim" value={selectedVolumeUsd > 0 ? compactUsd(selectedVolumeUsd) : "Kayıt yok"} /><DetailItem label="Toplam maliyet" value={preciseUsd(selected.networkFeeUsd + selected.dexFeeUsd)} /></div>
+    {!selectedIsBuy && <><h4 className="detail-heading">Satış sonucu</h4><div className="detail-grid"><DetailItem label="Maliyet temeli" value={selectedCostBasisUsd > 0 ? preciseUsd(selectedCostBasisUsd) : "Kayıt yok"} /><DetailItem label="Net satış geliri" value={selectedNetProceedsUsd > 0 ? preciseUsd(selectedNetProceedsUsd) : "Kayıt yok"} /><DetailItem label="Net PnL" value={selectedRealizedPnlUsd === null ? "Kayıt yok" : signedUsd(selectedRealizedPnlUsd)} strong /><DetailItem label="Getiri" value={selectedPnlPercent === null ? "Kayıt yok" : signedPercent(selectedPnlPercent)} /></div></>}
+    <div className="trade-detail-metadata"><h4 className="detail-heading">Yürütme ve mutabakat</h4><div className="detail-grid"><DetailItem label="Yerel muhasebe" value={executionAttemptWasNotSubmitted(selected) ? "Gerekmedi" : selected.accountingStatus === "applied" ? "Uygulandı" : "Bekliyor"} /><DetailItem label="Mutabakat" value={executionAttemptWasNotSubmitted(selected) ? "Gerekmedi" : selected.reconciliationStatus === "passed" ? "Geçti" : selected.reconciliationStatus === "failed" ? "Başarısız" : "Bekliyor"} /><DetailItem label="Slippage" value={`%${selected.slippagePercent.toFixed(3)}`} /><DetailItem label="Fiyat etkisi" value={`%${selected.priceImpactPercent.toFixed(3)}`} /><DetailItem label="Ağ maliyeti" value={preciseUsd(selected.networkFeeUsd)} /><DetailItem label="DEX maliyeti" value={preciseUsd(selected.dexFeeUsd)} />{selectedRentUsd > 0 && <DetailItem label="İade edilebilir kira" value={preciseUsd(selectedRentUsd)} />}<DetailItem label="Simülasyon" value={`${selected.simulationLatencyMs} ms`} /></div></div>
+    {selected.reconciliationDetails && <div className="decision-box"><span>Mutabakat sonucu</span><p>{selected.reconciliationDetails}</p></div>}{selected.errorMessage && <div className="decision-box"><span>Hata</span><p>{selected.errorMessage}</p></div>}
+    {selected.txHash && selected.integrationId !== "hyperliquid" && <a className="explorer-link" href={explorerUrl(selected.integrationId, selected.txHash)} target="_blank" rel="noreferrer">İşlemi explorer’da aç <ExternalLink size={14} /></a>}
+  </Modal>}</>;
 }
 
 function executionMetadataNumber(metadata: unknown, key: string) {
   if (!metadata || typeof metadata !== "object") return 0;
   const value = (metadata as Record<string, unknown>)[key];
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function executionMetadataNullableNumber(metadata: unknown, key: string) {
+  if (!metadata || typeof metadata !== "object") return null;
+  const value = (metadata as Record<string, unknown>)[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function executionMetadataString(metadata: unknown, key: string) {
+  if (!metadata || typeof metadata !== "object") return null;
+  const value = (metadata as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function executionAttemptWasNotSubmitted(attempt: DashboardSnapshot["executionAttempts"][number]) {
@@ -2309,7 +2357,7 @@ function executionAttemptStatusLabel(attempt: DashboardSnapshot["executionAttemp
   return "Başarısız";
 }
 
-function WalletDetail({ wallet, onClose, onChanged, onNotice }: { wallet: TrackedWallet; onClose: () => void; onChanged: () => void; onNotice: (value: { type: "success" | "error"; message: string }) => void }) {
+function WalletDetail({ wallet, chainId, pnl, onClose, onChanged, onNotice }: { wallet: TrackedWallet; chainId: ChainId; pnl: WalletNetworkPnl; onClose: () => void; onChanged: () => void; onNotice: (value: { type: "success" | "error"; message: string }) => void }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
   const scores = [["Kârlılık", wallet.scoreBreakdown.profitability], ["Tutarlılık", wallet.scoreBreakdown.consistency], ["Risk kontrolü", wallet.scoreBreakdown.riskControl], ["Kopyalanabilirlik", wallet.scoreBreakdown.copyability], ["Güvenlik", wallet.scoreBreakdown.safety]] as const;
@@ -2324,7 +2372,8 @@ function WalletDetail({ wallet, onClose, onChanged, onNotice }: { wallet: Tracke
     } catch (error) { onNotice({ type: "error", message: error instanceof Error ? error.message : "Cüzdan güncellenemedi." }); }
     finally { setBusy(false); }
   };
-  return <Modal title={wallet.label} subtitle={shortAddress(wallet.address)} onClose={onClose}><WalletTrackingState wallet={wallet} /><WalletAdditionSummary wallet={wallet} /><div className="score-summary"><strong>{wallet.score}</strong><span>Güncel genel skor</span></div>{wallet.pauseReason && <div className="decision-box"><span>Takibin durdurulma nedeni</span><p>{wallet.pauseReason}</p></div>}<div className="detail-grid"><DetailItem label="Güncel copy Net PnL" value={`${signedUsd(wallet.realizedPnlUsd)} · ${signedWalletPnlPercent(wallet)}`} strong /><DetailItem label="Hesaplanan sermaye" value={usd(walletCopyInvestedUsd(wallet))} /><DetailItem label="Başarılı copy trade" value={wallet.copiedTradeCount.toString()} /><DetailItem label="Gözlenen işlem" value={wallet.totalTrades.toString()} /></div><div className="score-breakdown">{scores.map(([label, score]) => <div key={label}><span>{label}</span><div><i style={{ width: `${score}%` }} /></div><strong>{score}</strong></div>)}</div><p className="detail-note">Net PnL, kapanış beklenmeden açık copy pozisyonların son piyasa fiyatını; kapanmış işlemlerin gerçekleşmiş sonucunu ve işlem maliyetlerini birlikte içerir.</p><div className="wallet-actions"><button disabled={busy} onClick={() => void mutate("PATCH")}>{wallet.state === "paused" ? <PlayCircle size={15} /> : <PauseCircle size={15} />}{wallet.state === "paused" ? "Takibi başlat" : "Takibi durdur"}</button>{confirmDelete ? <button className="danger" disabled={busy} onClick={() => void mutate("DELETE")}><Trash2 size={15} /> Silmeyi onayla</button> : <button className="danger-ghost" disabled={busy} onClick={() => setConfirmDelete(true)}><Trash2 size={15} /> Listeden çıkar</button>}</div></Modal>;
+  const pnlPercent = pnl.investedUsd > 0 ? pnl.pnlUsd / pnl.investedUsd * 100 : 0;
+  return <Modal title={wallet.label} subtitle={`${shortAddress(wallet.address)} · ${integrationName(chainId)}`} onClose={onClose}><WalletTrackingState wallet={wallet} /><WalletAdditionSummary wallet={wallet} /><div className="score-summary"><strong>{wallet.score}</strong><span>Güncel genel skor</span></div>{wallet.pauseReason && <div className="decision-box"><span>Takibin durdurulma nedeni</span><p>{wallet.pauseReason}</p></div>}<div className="detail-grid"><DetailItem label={`${integrationName(chainId)} copy Net PnL`} value={`${signedUsd(pnl.pnlUsd)} · ${pnlPercent >= 0 ? "+" : "−"}%${Math.abs(pnlPercent).toFixed(2)}`} strong /><DetailItem label={`${integrationName(chainId)} hesaplanan sermaye`} value={usd(pnl.investedUsd)} /><DetailItem label="Başarılı copy trade" value={wallet.copiedTradeCount.toString()} /><DetailItem label="Gözlenen işlem" value={wallet.totalTrades.toString()} /></div><div className="score-breakdown">{scores.map(([label, score]) => <div key={label}><span>{label}</span><div><i style={{ width: `${score}%` }} /></div><strong>{score}</strong></div>)}</div><p className="detail-note">Net PnL yalnızca seçili ağdaki kapanmış copy işlemlerini, açık copy pozisyonların güncel değerini ve bu işlemlerin maliyetlerini içerir.</p><div className="wallet-actions"><button disabled={busy} onClick={() => void mutate("PATCH")}>{wallet.state === "paused" ? <PlayCircle size={15} /> : <PauseCircle size={15} />}{wallet.state === "paused" ? "Takibi başlat" : "Takibi durdur"}</button>{confirmDelete ? <button className="danger" disabled={busy} onClick={() => void mutate("DELETE")}><Trash2 size={15} /> Silmeyi onayla</button> : <button className="danger-ghost" disabled={busy} onClick={() => setConfirmDelete(true)}><Trash2 size={15} /> Listeden çıkar</button>}</div></Modal>;
 }
 
 function WalletAdditionSummary({ wallet }: { wallet: TrackedWallet }) {
@@ -2334,11 +2383,13 @@ function WalletAdditionSummary({ wallet }: { wallet: TrackedWallet }) {
 }
 
 function TradeDetail({ trade, onClose }: { trade: Trade; onClose: () => void }) {
-  return <Modal title={`${trade.tokenSymbol} ${trade.side === "buy" ? "alımı" : "satışı"}`} subtitle={`${integrationName(trade.chainId)} · ${trade.source === "copy" ? "Kopya işlem" : "Manuel işlem"}`} onClose={onClose}><div className="detail-grid"><DetailItem label="Brüt değer" value={usd(trade.grossUsd)} /><DetailItem label="Net değer" value={usd(trade.netUsd)} /><DetailItem label="Token miktarı" value={trade.quantity ? trade.quantity.toFixed(8) : "—"} /><DetailItem label="Birim fiyat" value={usd(trade.priceUsd)} /></div><h4 className="detail-heading">Maliyet dağılımı</h4><div className="fee-list"><DetailItem label="DEX ücreti" value={usd(trade.fees.dexFeeUsd)} /><DetailItem label="Gas" value={usd(trade.fees.gasFeeUsd)} /><DetailItem label="Slippage" value={usd(trade.fees.slippageUsd)} /><DetailItem label="Fiyat etkisi" value={usd(trade.fees.priceImpactUsd)} /><DetailItem label="Token vergisi" value={usd(trade.fees.tokenTaxUsd)} /><DetailItem label="Toplam" value={usd(trade.fees.totalUsd)} strong /></div><div className="decision-box"><span>Karar gerekçesi</span><p>{trade.reason}</p></div>{trade.txHash && <a className="explorer-link" href={explorerUrl(trade.chainId, trade.txHash)} target="_blank" rel="noreferrer">Kaynak işlemi explorer’da aç <ExternalLink size={14} /></a>}</Modal>;
+  const pnlPercent = trade.side === "sell" && trade.grossUsd > 0 ? trade.realizedPnlUsd / trade.grossUsd * 100 : null;
+  return <Modal title={`${trade.tokenSymbol} ${trade.side === "buy" ? "alımı" : "satışı"}`} subtitle={`${integrationName(trade.chainId)} · ${trade.source === "copy" ? "Kopya işlem" : "Manuel işlem"}`} onClose={onClose}><div className="trade-detail-summary"><div><span>{trade.side === "buy" ? "Alım fiyatı" : "Satış fiyatı"}</span><strong>{preciseUsd(trade.priceUsd)}</strong><small>{dateTime(trade.createdAt)}</small></div><div><span>İşlem değeri</span><strong>{usd(trade.grossUsd)}</strong><small>{trade.quantity ? `${trade.quantity.toLocaleString(uiLocale(), { maximumFractionDigits: 8 })} token` : "Miktar kaydı yok"}</small></div><div className={`trade-detail-pnl ${trade.realizedPnlUsd >= 0 ? "positive" : "negative"}`}><span>{trade.side === "sell" ? "Gerçekleşen PnL" : "Net değer"}</span><strong>{trade.side === "sell" ? signedUsd(trade.realizedPnlUsd) : usd(trade.netUsd)}</strong><small>{pnlPercent === null ? `${usd(trade.fees.totalUsd)} maliyet` : signedPercent(pnlPercent)}</small></div></div><div className="detail-grid"><DetailItem label="Ağ" value={integrationName(trade.chainId)} /><DetailItem label="Tarih" value={dateTime(trade.createdAt)} /><DetailItem label="Market cap" value="Kayıt yok" /><DetailItem label="Durum" value={trade.status === "confirmed" ? "Tamamlandı" : trade.status === "skipped" ? "Reddedildi" : trade.status} /></div><h4 className="detail-heading">Maliyet dağılımı</h4><div className="fee-list"><DetailItem label="DEX ücreti" value={usd(trade.fees.dexFeeUsd)} /><DetailItem label="Gas" value={usd(trade.fees.gasFeeUsd)} /><DetailItem label="Slippage" value={usd(trade.fees.slippageUsd)} /><DetailItem label="Fiyat etkisi" value={usd(trade.fees.priceImpactUsd)} /><DetailItem label="Token vergisi" value={usd(trade.fees.tokenTaxUsd)} /><DetailItem label="Toplam" value={usd(trade.fees.totalUsd)} strong /></div><div className="decision-box"><span>Karar gerekçesi</span><p>{trade.reason}</p></div>{trade.txHash && <a className="explorer-link" href={explorerUrl(trade.chainId, trade.txHash)} target="_blank" rel="noreferrer">Kaynak işlemi explorer’da aç <ExternalLink size={14} /></a>}</Modal>;
 }
 
 function Modal({ title, subtitle, onClose, children }: { title: string; subtitle: string; onClose: () => void; children: React.ReactNode }) {
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="detail-modal" role="dialog" aria-modal="true" aria-label={title}><header><div><h3>{title}</h3><p>{subtitle}</p></div><button className="icon-button" onClick={onClose} title="Detayı kapat"><X size={17} /></button></header><div className="modal-body">{children}</div></section></div>;
+  const content = <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="detail-modal" role="dialog" aria-modal="true" aria-label={title}><header><div><h3>{title}</h3><p>{subtitle}</p></div><button className="icon-button" onClick={onClose} title="Detayı kapat"><X size={17} /></button></header><div className="modal-body">{children}</div></section></div>;
+  return typeof document === "undefined" ? null : createPortal(content, document.body);
 }
 
 function DetailItem({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) {
@@ -2385,17 +2436,8 @@ const overviewUsd = (value: number) => new Intl.NumberFormat(uiLocale(), { style
 const wholeUsd = (value: number) => new Intl.NumberFormat(uiLocale(), { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(value);
 const compactUsd = (value: number) => new Intl.NumberFormat(uiLocale(), { style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 1 }).format(value);
 const signedUsd = (value: number) => `${value >= 0 ? "+" : "−"}${usd(Math.abs(value))}`;
+const signedFormattedUsd = (value: number, formatter: (amount: number) => string) => `${value >= 0 ? "+" : "−"}${formatter(Math.abs(value))}`;
 const signedOverviewUsd = (value: number) => `${value >= 0 ? "+" : "−"}${overviewUsd(Math.abs(value))}`;
-const walletCopyInvestedUsd = (wallet: TrackedWallet) => Number.isFinite(wallet.copyInvestedUsd) ? wallet.copyInvestedUsd : 0;
-const walletCopyPnlPercent = (wallet: TrackedWallet) => {
-  if (Number.isFinite(wallet.copyPnlPercent)) return wallet.copyPnlPercent;
-  const investedUsd = walletCopyInvestedUsd(wallet);
-  return investedUsd > 0 ? (wallet.realizedPnlUsd / investedUsd) * 100 : 0;
-};
-const signedWalletPnlPercent = (wallet: TrackedWallet) => {
-  const value = walletCopyPnlPercent(wallet);
-  return `${value >= 0 ? "+" : "−"}%${Math.abs(value).toFixed(2)}`;
-};
 const formatTokenQuantity = (value: number) => new Intl.NumberFormat(uiLocale(), { maximumFractionDigits: 6 }).format(value);
 const dateTime = (value: string) => new Intl.DateTimeFormat(uiLocale(), { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 const percentOf = (value: number, total: number) => total ? ((value / total) * 100).toFixed(0) : "0";

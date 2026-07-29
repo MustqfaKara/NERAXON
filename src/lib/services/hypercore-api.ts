@@ -1,11 +1,14 @@
 import type { HypercoreFillObservation, HypercoreMarketType } from "@/lib/domain/types";
 import { mapSpotUniverseContexts } from "@/lib/engine/hypercore-market-mapping";
+import { hypercoreRetryDelayMs } from "@/lib/engine/hypercore-rate-limit";
 import { monitorService } from "@/lib/services/service-health";
 import { readCredentialSync } from "@/lib/security/credential-vault";
 
 const INFO_URL = readCredentialSync("hyperliquid-info-url") ?? "https://api.hyperliquid.xyz/info";
 const LEADERBOARD_URL = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard";
 const REQUEST_TIMEOUT_MS = 30_000;
+const MIN_REQUEST_INTERVAL_MS = 125;
+const MAX_REQUEST_ATTEMPTS = 4;
 
 interface RawFill {
   coin: string;
@@ -76,66 +79,96 @@ interface RawLeaderboardRow {
 let marketCache: { expiresAt: number; markets: HypercoreMarket[] } | null = null;
 let leaderboardCache: { expiresAt: number; rows: HypercoreLeaderboardRow[] } | null = null;
 let perpDexCache: { expiresAt: number; names: string[] } | null = null;
+let marketRequest: Promise<HypercoreMarket[]> | null = null;
+
+interface InfoCacheEntry {
+  expiresAt: number;
+  value: unknown;
+}
+
+const globalHypercoreState = globalThis as typeof globalThis & {
+  __neraxonHypercoreInfoCache?: Map<string, InfoCacheEntry>;
+  __neraxonHypercoreInfoRequests?: Map<string, Promise<unknown>>;
+  __neraxonHypercoreRequestQueue?: Promise<void>;
+  __neraxonHypercoreLastRequestAt?: number;
+  __neraxonHypercoreCooldownUntil?: number;
+};
+const infoCache = globalHypercoreState.__neraxonHypercoreInfoCache ?? new Map<string, InfoCacheEntry>();
+const infoRequests = globalHypercoreState.__neraxonHypercoreInfoRequests ?? new Map<string, Promise<unknown>>();
+globalHypercoreState.__neraxonHypercoreInfoCache = infoCache;
+globalHypercoreState.__neraxonHypercoreInfoRequests = infoRequests;
+globalHypercoreState.__neraxonHypercoreRequestQueue ??= Promise.resolve();
+globalHypercoreState.__neraxonHypercoreLastRequestAt ??= 0;
+globalHypercoreState.__neraxonHypercoreCooldownUntil ??= 0;
 
 export async function hypercoreInfo<T>(body: Record<string, unknown>): Promise<T> {
-  return monitorService("hyperliquid_info", async () => {
-    const response = await fetch(INFO_URL, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      cache: "no-store",
-    });
-    if (!response.ok) throw new Error(`HyperCore Info API hatası (${response.status}).`);
-    return response.json() as Promise<T>;
-  });
+  const key = JSON.stringify(body);
+  const cached = infoCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    return monitorService("hyperliquid_info", async () => cached.value as T, { cacheHit: true });
+  }
+  if (cached) infoCache.delete(key);
+  const running = infoRequests.get(key);
+  if (running) return running as Promise<T>;
+
+  const request = monitorService("hyperliquid_info", () => enqueueHypercoreRequest(async () => {
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < MAX_REQUEST_ATTEMPTS; attempt += 1) {
+      await waitForHypercoreRequestSlot();
+      try {
+        const response = await fetch(INFO_URL, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          cache: "no-store",
+        });
+        if (response.ok) {
+          const value = await response.json() as T;
+          const cacheTtlMs = hypercoreInfoCacheTtlMs(body.type);
+          if (cacheTtlMs > 0) infoCache.set(key, { expiresAt: Date.now() + cacheTtlMs, value });
+          return value;
+        }
+        const detail = (await response.text()).trim();
+        lastError = new Error(`HyperCore Info API hatası (${response.status})${detail ? `: ${detail.slice(0, 240)}` : "."}`);
+        if (response.status !== 429 || attempt >= MAX_REQUEST_ATTEMPTS - 1) throw lastError;
+        const retryMs = hypercoreRetryDelayMs(response.headers.get("retry-after"), attempt);
+        globalHypercoreState.__neraxonHypercoreCooldownUntil = Math.max(
+          globalHypercoreState.__neraxonHypercoreCooldownUntil ?? 0,
+          Date.now() + retryMs,
+        );
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error("HyperCore Info API isteği başarısız.");
+        if (attempt >= MAX_REQUEST_ATTEMPTS - 1 || !isTransientHypercoreError(lastError)) throw lastError;
+        const retryMs = hypercoreRetryDelayMs(null, attempt);
+        globalHypercoreState.__neraxonHypercoreCooldownUntil = Math.max(
+          globalHypercoreState.__neraxonHypercoreCooldownUntil ?? 0,
+          Date.now() + retryMs,
+        );
+      }
+    }
+    throw lastError ?? new Error("HyperCore Info API tekrar denemelerden sonra yanıt vermedi.");
+  }));
+  infoRequests.set(key, request);
+  try {
+    return await request;
+  } finally {
+    infoRequests.delete(key);
+  }
 }
 
 export async function getHypercoreMarkets(forceRefresh = false): Promise<HypercoreMarket[]> {
   if (!forceRefresh && marketCache && marketCache.expiresAt > Date.now()) return marketCache.markets;
-  const [[perpMeta, perpContexts], [spotMeta, spotContexts], perpDexs] = await Promise.all([
-    hypercoreInfo<[PerpMeta, AssetContext[]]>({ type: "metaAndAssetCtxs" }),
-    hypercoreInfo<[SpotMeta, AssetContext[]]>({ type: "spotMetaAndAssetCtxs" }),
-    hypercoreInfo<Array<PerpDex | null>>({ type: "perpDexs" }),
-  ]);
-  const perpMarkets = perpMeta.universe.map((asset, index) => toMarket(
-    asset.name,
-    asset.name,
-    "perp",
-    perpContexts[index],
-    asset.maxLeverage,
-    index,
-    asset.szDecimals,
-  ));
-  const spotMarkets = mapHypercoreSpotMarkets(spotMeta, spotContexts);
-  const builderDexMarkets = (await mapWithConcurrency(
-    perpDexs
-      .map((dex, index) => ({ dex, index }))
-      .filter((item): item is { dex: PerpDex; index: number } => item.index > 0 && Boolean(item.dex?.name)),
-    3,
-    async ({ dex, index: dexIndex }) => {
-      try {
-        const [meta, contexts] = await hypercoreInfo<[PerpMeta, AssetContext[]]>({
-          type: "metaAndAssetCtxs",
-          dex: dex.name,
-        });
-        return meta.universe.map((asset, marketIndex) => toMarket(
-          asset.name,
-          asset.name,
-          "perp",
-          contexts[marketIndex],
-          asset.maxLeverage,
-          100_000 + dexIndex * 10_000 + marketIndex,
-          asset.szDecimals,
-        ));
-      } catch {
-        return [];
-      }
-    },
-  )).flat();
-  const markets = [...perpMarkets, ...builderDexMarkets, ...spotMarkets].filter((market) => market.priceUsd > 0);
-  marketCache = { expiresAt: Date.now() + 30_000, markets };
-  return markets;
+  if (marketRequest) return marketRequest;
+  marketRequest = loadHypercoreMarkets().catch((error) => {
+    if (marketCache?.markets.length) return marketCache.markets;
+    throw error;
+  });
+  try {
+    return await marketRequest;
+  } finally {
+    marketRequest = null;
+  }
 }
 
 export function hypercoreDexName(coin: string) {
@@ -305,3 +338,81 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper:
   }));
   return results;
 }
+
+async function loadHypercoreMarkets() {
+  const [[perpMeta, perpContexts], [spotMeta, spotContexts], perpDexs] = await Promise.all([
+    hypercoreInfo<[PerpMeta, AssetContext[]]>({ type: "metaAndAssetCtxs" }),
+    hypercoreInfo<[SpotMeta, AssetContext[]]>({ type: "spotMetaAndAssetCtxs" }),
+    hypercoreInfo<Array<PerpDex | null>>({ type: "perpDexs" }),
+  ]);
+  const perpMarkets = perpMeta.universe.map((asset, index) => toMarket(
+    asset.name,
+    asset.name,
+    "perp",
+    perpContexts[index],
+    asset.maxLeverage,
+    index,
+    asset.szDecimals,
+  ));
+  const spotMarkets = mapHypercoreSpotMarkets(spotMeta, spotContexts);
+  const builderDexMarkets = (await mapWithConcurrency(
+    perpDexs
+      .map((dex, index) => ({ dex, index }))
+      .filter((item): item is { dex: PerpDex; index: number } => item.index > 0 && Boolean(item.dex?.name)),
+    3,
+    async ({ dex, index: dexIndex }) => {
+      try {
+        const [meta, contexts] = await hypercoreInfo<[PerpMeta, AssetContext[]]>({
+          type: "metaAndAssetCtxs",
+          dex: dex.name,
+        });
+        return meta.universe.map((asset, marketIndex) => toMarket(
+          asset.name,
+          asset.name,
+          "perp",
+          contexts[marketIndex],
+          asset.maxLeverage,
+          100_000 + dexIndex * 10_000 + marketIndex,
+          asset.szDecimals,
+        ));
+      } catch {
+        return [];
+      }
+    },
+  )).flat();
+  const markets = [...perpMarkets, ...builderDexMarkets, ...spotMarkets].filter((market) => market.priceUsd > 0);
+  marketCache = { expiresAt: Date.now() + 30_000, markets };
+  return markets;
+}
+
+function enqueueHypercoreRequest<T>(operation: () => Promise<T>) {
+  const queued = (globalHypercoreState.__neraxonHypercoreRequestQueue ?? Promise.resolve()).then(operation, operation);
+  globalHypercoreState.__neraxonHypercoreRequestQueue = queued.then(() => undefined, () => undefined);
+  return queued;
+}
+
+async function waitForHypercoreRequestSlot() {
+  const availableAt = Math.max(
+    (globalHypercoreState.__neraxonHypercoreLastRequestAt ?? 0) + MIN_REQUEST_INTERVAL_MS,
+    globalHypercoreState.__neraxonHypercoreCooldownUntil ?? 0,
+  );
+  const waitMs = availableAt - Date.now();
+  if (waitMs > 0) await delay(waitMs);
+  globalHypercoreState.__neraxonHypercoreLastRequestAt = Date.now();
+}
+
+function hypercoreInfoCacheTtlMs(type: unknown) {
+  if (type === "perpDexs") return 5 * 60_000;
+  if (type === "metaAndAssetCtxs" || type === "spotMetaAndAssetCtxs") return 30_000;
+  if (type === "allMids") return 10_000;
+  if (type === "userAbstraction") return 60_000;
+  if (type === "userFillsByTime") return 15_000;
+  if (type === "userNonFundingLedgerUpdates") return 30_000;
+  return 0;
+}
+
+function isTransientHypercoreError(error: Error) {
+  return /429|rate.?limit|too many requests|fetch|timeout|aborted|5\d\d/i.test(error.message);
+}
+
+const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));

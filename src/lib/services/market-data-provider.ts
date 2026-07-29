@@ -20,6 +20,8 @@ export interface MarketSnapshot {
   fetchedAt: string;
   buys24h?: number;
   sells24h?: number;
+  marketKind?: "amm" | "robinhood-portal";
+  exitRouteVerified?: boolean;
 }
 
 interface DexPair {

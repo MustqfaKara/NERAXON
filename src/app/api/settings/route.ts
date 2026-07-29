@@ -8,8 +8,8 @@ import { isAddress } from "viem";
 import { PublicKey } from "@solana/web3.js";
 
 const riskSchema = z.object({
-  minPositionPercent: z.number().min(1).max(10),
-  maxPositionPercent: z.number().min(5).max(20),
+  minPositionPercent: z.number().min(1).max(30),
+  maxPositionPercent: z.number().min(5).max(30),
   dailyLossLimitPercent: z.number().min(1).max(30),
   maxOpenPositions: z.number().int().min(1).max(30),
   maxTokenExposurePercent: z.number().min(5).max(100),
@@ -23,6 +23,8 @@ const riskSchema = z.object({
   maxPriceChange24hPercent: z.number().min(5).max(500),
   maxWalletSwapsPerHour: z.number().int().min(1).max(500),
   maxWalletSwapsPer24Hours: z.number().int().min(1).max(5_000),
+  hypercoreMaxWalletFillsPerHour: z.number().int().min(1).max(500),
+  hypercoreMaxWalletFillsPer24Hours: z.number().int().min(1).max(5_000),
   maxHypercoreLeverage: z.number().int().min(1).max(20),
   maxLiveTradeUsd: z.number().min(1).max(100_000),
   maxLiveGasUsd: z.number().min(0.01).max(10_000),
@@ -55,6 +57,8 @@ const riskSchema = z.object({
   message: "Minimum pozisyon oranı maksimum orandan büyük olamaz.",
 }).refine((value) => value.maxWalletSwapsPerHour <= value.maxWalletSwapsPer24Hours, {
   message: "Saatlik cüzdan swap sınırı 24 saatlik sınırdan büyük olamaz.",
+}).refine((value) => value.hypercoreMaxWalletFillsPerHour <= value.hypercoreMaxWalletFillsPer24Hours, {
+  message: "HyperCore saatlik fill sınırı 24 saatlik sınırdan büyük olamaz.",
 });
 
 function feeLimitSchema() {

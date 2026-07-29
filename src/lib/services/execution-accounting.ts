@@ -55,12 +55,12 @@ export async function refreshExecutionMarkets(mode: "shadow" | "live") {
     const marketByAsset = new Map(markets.map((market) => [market.tokenAddress.toLowerCase(), market]));
     for (const lot of chainLots) {
       const market = marketByAsset.get(lot.assetKey.toLowerCase());
-      if (market) store.updateExecutionLotMarket(lot.id, market.priceUsd);
+      if (market) store.updateExecutionLotMarket(lot.id, market.priceUsd, market.pairAddress);
     }
   }));
 
   if (hypercoreLots.length) {
-    const markets = await getHypercoreMarkets(true);
+    const markets = await getHypercoreMarkets();
     for (const lot of hypercoreLots) {
       const symbol = lot.assetKey.split(":").slice(1).join(":");
       const market = findHypercoreMarket(markets, lot.marketType === "perp" ? "perp" : "spot", symbol);

@@ -10,6 +10,8 @@ import { store } from "@/lib/repositories/store";
 import { isExpectedShadowFundingError } from "@/lib/solana/shadow-simulation";
 import { assertAssetNotDenied } from "@/lib/engine/asset-execution-policy";
 import { calculateSolanaBuyTransactionCosts } from "@/lib/execution/solana-fee";
+import { getNetworkExecutionLimit } from "@/lib/execution/network-execution-risk";
+import { isJupiterSlippageError, nextJupiterSlippageBps } from "@/lib/execution/live-error-policy";
 
 export interface SolanaExecutionIntent {
   side: TradeSide;
@@ -93,12 +95,28 @@ class SolanaExecutionAdapter implements ExecutionAdapter<SolanaExecutionIntent, 
     const keypair = await readSolanaKeypair();
     if (keypair.publicKey.toBase58() !== plan.userPublicKey) throw new Error("Hazırlanan işlem ile Keychain imzalayıcısı eşleşmiyor.");
     const tokenBalanceBefore = await readTokenBalance(plan.userPublicKey, plan.tokenAddress);
-    const transaction = VersionedTransaction.deserialize(Buffer.from(plan.transaction.swapTransaction, "base64"));
-    transaction.sign([keypair]);
-    const signature = await solanaRpc<string>("sendTransaction", [
-      Buffer.from(transaction.serialize()).toString("base64"),
-      { encoding: "base64", skipPreflight: false, preflightCommitment: "confirmed", maxRetries: 3 },
-    ]);
+    let signature: string;
+    try {
+      signature = await signAndSendSolanaTransaction(plan, keypair);
+    } catch (error) {
+      if (!isJupiterSlippageError(error)) throw error;
+      const maximumBps = Math.round(
+        getNetworkExecutionLimit("solana", store.getRiskSettings()).maxSlippagePercent * 100,
+      );
+      const retryBps = nextJupiterSlippageBps(plan.quote.slippageBps, maximumBps);
+      if (retryBps <= plan.quote.slippageBps) throw error;
+      const refreshedQuote = await getJupiterQuote({
+        inputMint: plan.quote.inputMint,
+        outputMint: plan.quote.outputMint,
+        amount: plan.sellAmount,
+        slippageBps: retryBps,
+      });
+      plan.quote = refreshedQuote;
+      plan.transaction = await buildJupiterSwap(refreshedQuote, plan.userPublicKey);
+      plan.estimatedPriorityFeeLamports = plan.transaction.prioritizationFeeLamports ?? 0;
+      plan.quotedAt = new Date().toISOString();
+      signature = await signAndSendSolanaTransaction(plan, keypair);
+    }
     await hooks?.onSubmitted({ txHash: signature });
     await waitForConfirmation(signature, plan.transaction.lastValidBlockHeight);
     const tokenBalanceAfter = await waitForTokenBalanceChange(plan.userPublicKey, plan.tokenAddress, tokenBalanceBefore, plan.side);
@@ -128,6 +146,18 @@ class SolanaExecutionAdapter implements ExecutionAdapter<SolanaExecutionIntent, 
     if (spendable <= 0n) throw new Error("SOL bakiyesi işlem ve fee rezervi için yetersiz.");
     return spendable * BigInt(Math.max(1, Math.round(allocationPercent * 100))) / 10_000n;
   }
+}
+
+async function signAndSendSolanaTransaction(
+  plan: SolanaExecutionPlan,
+  keypair: Awaited<ReturnType<typeof readSolanaKeypair>>,
+) {
+  const transaction = VersionedTransaction.deserialize(Buffer.from(plan.transaction.swapTransaction, "base64"));
+  transaction.sign([keypair]);
+  return solanaRpc<string>("sendTransaction", [
+    Buffer.from(transaction.serialize()).toString("base64"),
+    { encoding: "base64", skipPreflight: false, preflightCommitment: "confirmed", maxRetries: 3 },
+  ]);
 }
 
 async function waitForConfirmation(signature: string, lastValidBlockHeight: number) {

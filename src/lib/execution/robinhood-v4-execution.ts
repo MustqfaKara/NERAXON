@@ -3,9 +3,11 @@ import {
   decodeEventLog,
   defineChain,
   erc20Abi,
+  formatUnits,
   getAddress,
   isAddress,
   parseAbi,
+  parseEther,
   type Address,
   type Hex,
 } from "viem";
@@ -22,6 +24,13 @@ import { getExecutionAccount } from "@/lib/services/execution-account-service";
 import { store } from "@/lib/repositories/store";
 import { assertAssetNotDenied } from "@/lib/engine/asset-execution-policy";
 import type { ExecutionSubmissionHooks } from "@/lib/execution/execution-adapter";
+import {
+  buildRobinhoodPortalTransaction,
+  quoteRobinhoodPortalBuy,
+  quoteRobinhoodPortalSell,
+  ROBINHOOD_PORTAL_ROUTER,
+} from "@/lib/execution/robinhood-portal-route";
+import { getEvmNativeMarketPrice } from "@/lib/services/gas-estimator";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 const POOL_MANAGER = "0x8366a39cc670b4001a1121b8f6a443a643e40951" as Address;
@@ -58,6 +67,10 @@ export interface RobinhoodExecutionIntent {
   allocationPercent?: number;
   sellPercent?: number;
   exactSellAmount?: bigint;
+  preferredVenue?: "amm" | "robinhood-portal";
+  referencePriceUsd?: number;
+  tokenDecimals?: number;
+  portalExitRouteVerified?: boolean;
   slippagePercent: number;
   mode: Exclude<TradingMode, "paper">;
 }
@@ -67,6 +80,8 @@ export interface RobinhoodExecutionQuote {
   side: TradeSide;
   account: Address;
   tokenAddress: Address;
+  venue: "uniswap-v4" | "robinhood-portal";
+  portalExitRouteVerified: boolean;
   poolId: Hex;
   poolKey: PoolKey;
   sellAmount: bigint;
@@ -111,7 +126,17 @@ export async function prepareRobinhoodExecution(intent: RobinhoodExecutionIntent
       : intent.exactSellAmount > balance ? balance : intent.exactSellAmount;
   if (sellAmount <= 0n) throw new Error(intent.side === "buy" ? "Gas rezervi sonrasında kullanılabilir ETH yok." : "Satılabilecek token bakiyesi yok.");
 
-  const candidates = await resolvePools(tokenAddress);
+  if (intent.preferredVenue === "robinhood-portal") {
+    return prepareRobinhoodPortalQuote({ intent, account: accountAddressNormalized, tokenAddress, sellAmount });
+  }
+
+  const candidates = await resolvePools(tokenAddress).catch((error) => {
+    if (!intent.portalExitRouteVerified) throw error;
+    return [];
+  });
+  if (!candidates.length && intent.portalExitRouteVerified) {
+    return prepareRobinhoodPortalQuote({ intent, account: accountAddressNormalized, tokenAddress, sellAmount });
+  }
   let selected: { poolId: Hex; poolKey: PoolKey; buyAmount: bigint } | null = null;
   let lastQuoteError: Error | null = null;
   for (const candidate of candidates) {
@@ -152,6 +177,8 @@ export async function prepareRobinhoodExecution(intent: RobinhoodExecutionIntent
     side: intent.side,
     account: accountAddressNormalized,
     tokenAddress,
+    venue: "uniswap-v4",
+    portalExitRouteVerified: false,
     poolId,
     poolKey,
     sellAmount,
@@ -194,31 +221,51 @@ export async function executeRobinhoodQuote(quote: RobinhoodExecutionQuote, mode
   let approvalGasCost = 0n;
 
   if (quote.side === "sell") {
-    const tokenAllowance = await publicClient.readContract({ address: quote.tokenAddress, abi: erc20Abi, functionName: "allowance", args: [account.address, PERMIT2] });
+    const approvalSpender = quote.venue === "robinhood-portal" ? ROBINHOOD_PORTAL_ROUTER : PERMIT2;
+    const tokenAllowance = await publicClient.readContract({ address: quote.tokenAddress, abi: erc20Abi, functionName: "allowance", args: [account.address, approvalSpender] });
     if (tokenAllowance < quote.sellAmount) {
-      const approval = await publicClient.simulateContract({ account, address: quote.tokenAddress, abi: erc20Abi, functionName: "approve", args: [PERMIT2, quote.sellAmount] });
+      const approval = await publicClient.simulateContract({ account, address: quote.tokenAddress, abi: erc20Abi, functionName: "approve", args: [approvalSpender, quote.sellAmount] });
       tokenApprovalTxHash = await walletClient.writeContract(approval.request);
-      approvalGasCost += await requireSuccessfulReceipt(tokenApprovalTxHash, "Token Permit2 izni");
+      approvalGasCost += await requireSuccessfulReceipt(tokenApprovalTxHash, quote.venue === "robinhood-portal" ? "Robinhood Portal token izni" : "Token Permit2 izni");
       const confirmedAllowance = await pollValue(
-        () => publicClient.readContract({ address: quote.tokenAddress, abi: erc20Abi, functionName: "allowance", args: [account.address, PERMIT2] }),
+        () => publicClient.readContract({ address: quote.tokenAddress, abi: erc20Abi, functionName: "allowance", args: [account.address, approvalSpender] }),
         (value) => value >= quote.sellAmount,
       );
-      if (confirmedAllowance < quote.sellAmount) throw new Error("Token Permit2 izni onaylandı ancak RPC güncel allowance değerini doğrulayamadı.");
+      if (confirmedAllowance < quote.sellAmount) throw new Error("Token satış izni onaylandı ancak RPC güncel allowance değerini doğrulayamadı.");
     }
-    const [permitAmount, permitExpiration] = await publicClient.readContract({ address: PERMIT2, abi: PERMIT2_ABI, functionName: "allowance", args: [account.address, quote.tokenAddress, UNIVERSAL_ROUTER] });
-    const expiration = BigInt(Math.floor(Date.now() / 1000) + 30 * 60);
-    if (permitAmount < quote.sellAmount || permitExpiration <= BigInt(Math.floor(Date.now() / 1000) + 60)) {
-      if (quote.sellAmount > UINT160_MAX) throw new Error("Satış miktarı Permit2 uint160 sınırını aşıyor.");
-      const approval = await publicClient.simulateContract({ account, address: PERMIT2, abi: PERMIT2_ABI, functionName: "approve", args: [quote.tokenAddress, UNIVERSAL_ROUTER, quote.sellAmount, Number(expiration)] });
-      permit2ApprovalTxHash = await walletClient.writeContract(approval.request);
-      approvalGasCost += await requireSuccessfulReceipt(permit2ApprovalTxHash, "Universal Router Permit2 izni");
-      const confirmedPermit = await pollValue(
-        () => publicClient.readContract({ address: PERMIT2, abi: PERMIT2_ABI, functionName: "allowance", args: [account.address, quote.tokenAddress, UNIVERSAL_ROUTER] }),
-        ([amount, expiresAt]) => amount >= quote.sellAmount && expiresAt > BigInt(Math.floor(Date.now() / 1000) + 60),
-      );
-      if (confirmedPermit[0] < quote.sellAmount || confirmedPermit[1] <= BigInt(Math.floor(Date.now() / 1000) + 60)) {
-        throw new Error("Universal Router Permit2 izni onaylandı ancak RPC güncel izni doğrulayamadı.");
+    if (quote.venue === "uniswap-v4") {
+      const [permitAmount, permitExpiration] = await publicClient.readContract({ address: PERMIT2, abi: PERMIT2_ABI, functionName: "allowance", args: [account.address, quote.tokenAddress, UNIVERSAL_ROUTER] });
+      const expiration = BigInt(Math.floor(Date.now() / 1000) + 30 * 60);
+      if (permitAmount < quote.sellAmount || permitExpiration <= BigInt(Math.floor(Date.now() / 1000) + 60)) {
+        if (quote.sellAmount > UINT160_MAX) throw new Error("Satış miktarı Permit2 uint160 sınırını aşıyor.");
+        const approval = await publicClient.simulateContract({ account, address: PERMIT2, abi: PERMIT2_ABI, functionName: "approve", args: [quote.tokenAddress, UNIVERSAL_ROUTER, quote.sellAmount, Number(expiration)] });
+        permit2ApprovalTxHash = await walletClient.writeContract(approval.request);
+        approvalGasCost += await requireSuccessfulReceipt(permit2ApprovalTxHash, "Universal Router Permit2 izni");
+        const confirmedPermit = await pollValue(
+          () => publicClient.readContract({ address: PERMIT2, abi: PERMIT2_ABI, functionName: "allowance", args: [account.address, quote.tokenAddress, UNIVERSAL_ROUTER] }),
+          ([amount, expiresAt]) => amount >= quote.sellAmount && expiresAt > BigInt(Math.floor(Date.now() / 1000) + 60),
+        );
+        if (confirmedPermit[0] < quote.sellAmount || confirmedPermit[1] <= BigInt(Math.floor(Date.now() / 1000) + 60)) {
+          throw new Error("Universal Router Permit2 izni onaylandı ancak RPC güncel izni doğrulayamadı.");
+        }
       }
+    }
+    if (quote.venue === "robinhood-portal") {
+      const slippageRatio = quote.buyAmount > 0n
+        ? quote.minBuyAmount * 10_000n / quote.buyAmount
+        : 9_925n;
+      quote.buyAmount = await quoteRobinhoodPortalSell({
+        account: account.address,
+        tokenAddress: quote.tokenAddress,
+        amountIn: quote.sellAmount,
+      });
+      quote.minBuyAmount = quote.buyAmount * slippageRatio / 10_000n;
+      quote.transaction = buildRobinhoodPortalTransaction({
+        side: "sell",
+        tokenAddress: quote.tokenAddress,
+        amountIn: quote.sellAmount,
+        minReturn: quote.minBuyAmount,
+      });
     }
   }
 
@@ -271,6 +318,10 @@ export async function executeRobinhoodQuote(quote: RobinhoodExecutionQuote, mode
   }
 
   async function hasSellAllowances(currentQuote: RobinhoodExecutionQuote, owner: Address) {
+    if (currentQuote.venue === "robinhood-portal") {
+      const allowance = await publicClient.readContract({ address: currentQuote.tokenAddress, abi: erc20Abi, functionName: "allowance", args: [owner, ROBINHOOD_PORTAL_ROUTER] });
+      return allowance >= currentQuote.sellAmount;
+    }
     const tokenAllowance = await publicClient.readContract({ address: currentQuote.tokenAddress, abi: erc20Abi, functionName: "allowance", args: [owner, PERMIT2] });
     const [permitAmount, permitExpiration] = await publicClient.readContract({ address: PERMIT2, abi: PERMIT2_ABI, functionName: "allowance", args: [owner, currentQuote.tokenAddress, UNIVERSAL_ROUTER] });
     return tokenAllowance >= currentQuote.sellAmount && permitAmount >= currentQuote.sellAmount && permitExpiration > BigInt(Math.floor(Date.now() / 1000) + 60);
@@ -279,6 +330,7 @@ export async function executeRobinhoodQuote(quote: RobinhoodExecutionQuote, mode
 
 export async function verifyRobinhoodSellRoute(quote: RobinhoodExecutionQuote) {
   if (quote.side !== "buy" || quote.buyAmount <= 0n) return false;
+  if (quote.venue === "robinhood-portal") return quote.portalExitRouteVerified;
   const zeroForOne = quote.poolKey.currency0 === quote.tokenAddress;
   const result = await getPublicClient("robinhood").readContract({
     address: V4_QUOTER,
@@ -287,6 +339,75 @@ export async function verifyRobinhoodSellRoute(quote: RobinhoodExecutionQuote) {
     args: [{ poolKey: quote.poolKey, zeroForOne, exactAmount: quote.buyAmount, hookData: "0x" }],
   }) as unknown as readonly [bigint, bigint];
   return result[0] > 0n;
+}
+
+async function prepareRobinhoodPortalQuote(input: {
+  intent: RobinhoodExecutionIntent;
+  account: Address;
+  tokenAddress: Address;
+  sellAmount: bigint;
+}): Promise<RobinhoodExecutionQuote> {
+  if (!input.intent.portalExitRouteVerified) {
+    throw new Error("Robinhood Portal satış rotası doğrulanmadan işlem hazırlanamaz.");
+  }
+  const buyAmount = input.intent.side === "buy"
+    ? await quoteRobinhoodPortalBuy({
+      account: input.account,
+      tokenAddress: input.tokenAddress,
+      amountIn: input.sellAmount,
+    })
+    : await estimatePortalSellOutput(input.intent, input.sellAmount);
+  if (buyAmount <= 0n) throw new Error("Robinhood Portal quote sıfır çıktı.");
+  const minBuyAmount = buyAmount * BigInt(Math.floor((100 - input.intent.slippagePercent) * 100)) / 10_000n;
+  if (minBuyAmount <= 0n) throw new Error("Robinhood Portal minimum çıktı miktarı sıfır olamaz.");
+  const transaction = buildRobinhoodPortalTransaction({
+    side: input.intent.side,
+    tokenAddress: input.tokenAddress,
+    amountIn: input.sellAmount,
+    minReturn: minBuyAmount,
+  });
+  if (input.intent.side === "buy") {
+    await getPublicClient("robinhood").call({
+      account: input.account,
+      ...transaction,
+    });
+  }
+  return {
+    chainId: "robinhood",
+    side: input.intent.side,
+    account: input.account,
+    tokenAddress: input.tokenAddress,
+    venue: "robinhood-portal",
+    portalExitRouteVerified: true,
+    poolId: `0x${"0".repeat(64)}` as Hex,
+    poolKey: {
+      currency0: input.intent.side === "buy" ? ZERO_ADDRESS : input.tokenAddress,
+      currency1: input.intent.side === "buy" ? input.tokenAddress : ZERO_ADDRESS,
+      fee: 0,
+      tickSpacing: 0,
+      hooks: ZERO_ADDRESS,
+    },
+    sellAmount: input.sellAmount,
+    buyAmount,
+    minBuyAmount,
+    transaction,
+    quotedAt: new Date().toISOString(),
+  };
+}
+
+async function estimatePortalSellOutput(intent: RobinhoodExecutionIntent, sellAmount: bigint) {
+  if (!Number.isFinite(intent.referencePriceUsd) || Number(intent.referencePriceUsd) <= 0) {
+    throw new Error("Robinhood Portal satışı için güncel referans fiyat bulunamadı.");
+  }
+  const decimals = intent.tokenDecimals;
+  if (!Number.isInteger(decimals) || decimals === undefined || decimals < 0 || decimals > 36) {
+    throw new Error("Robinhood Portal token decimals bilgisi geçersiz.");
+  }
+  const nativePriceUsd = await getEvmNativeMarketPrice("robinhood");
+  const tokenQuantity = Number(formatUnits(sellAmount, decimals));
+  const nativeAmount = tokenQuantity * Number(intent.referencePriceUsd) / nativePriceUsd;
+  if (!Number.isFinite(nativeAmount) || nativeAmount <= 0) return 0n;
+  return parseEther(nativeAmount.toFixed(18));
 }
 
 async function resolvePools(tokenAddress: Address): Promise<Array<{ poolId: Hex; poolKey: PoolKey }>> {

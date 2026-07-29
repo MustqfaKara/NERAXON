@@ -71,6 +71,16 @@ export function calculatePortfolioEquity(cashBalanceUsd: number, positionValueUs
   return cashBalanceUsd + positionValueUsd + reservedBalanceUsd;
 }
 
+export function shouldInitializeLiveFundingBaseline(input: {
+  initialEquityUsd: number;
+  currentEquityUsd: number;
+  hasExecutionHistory: boolean;
+}) {
+  return input.initialEquityUsd <= 0.01
+    && input.currentEquityUsd > 0.01
+    && !input.hasExecutionHistory;
+}
+
 export function calculateBalanceDifference(input: {
   equityUsd: number;
   startingEquityUsd: number;
@@ -93,6 +103,6 @@ export function calculateLiveAccountPnl(input: {
     totalPnlUsd,
     realizedPnlUsd,
     dailyPnlUsd: input.equityUsd - input.dailyStartEquityUsd,
-    accountDifferenceUsd: realizedPnlUsd - input.executionRealizedPnlUsd,
+    accountDifferenceUsd: totalPnlUsd - input.executionRealizedPnlUsd,
   };
 }

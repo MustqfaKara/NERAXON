@@ -66,7 +66,7 @@ test("Solana tarafında toz veya zararlı token akışını adaya katmaz", () =>
   }), false);
 });
 
-test("Solana keşfi en az 100 USD net kârı kabul eder", () => {
+test("Solana keşfi 100 USD kârla birlikte en az yüzde 100 net ROI ister", () => {
   const base = {
     boughtUsd: 200,
     soldUsd: 0,
@@ -74,6 +74,12 @@ test("Solana keşfi en az 100 USD net kârı kabul eder", () => {
     estimatedPnlPercent: 15,
     swapCount: 2,
   };
-  assert.equal(isSolanaDiscoveryWalletEligible({ ...base, estimatedPnlUsd: 100 }), true);
+  assert.equal(isSolanaDiscoveryWalletEligible({ ...base, estimatedPnlUsd: 100 }), false);
   assert.equal(isSolanaDiscoveryWalletEligible({ ...base, estimatedPnlUsd: 99 }), false);
+  assert.equal(isSolanaDiscoveryWalletEligible({
+    ...base,
+    currentValueUsd: 400,
+    estimatedPnlUsd: 200,
+    estimatedPnlPercent: 100,
+  }), true);
 });

@@ -7,7 +7,7 @@ import { store } from "@/lib/repositories/store";
 import { publishEvent } from "@/lib/services/audit-service";
 import { getMarketDataProvider } from "@/lib/services/market-data-provider";
 import { inspectContractSecurity, mergeTokenSafety } from "@/lib/services/contract-security-service";
-import { formatEther, formatUnits, getAddress, parseUnits, type Address } from "viem";
+import { formatEther, formatUnits, getAddress, isAddress, parseUnits, type Address } from "viem";
 import { getEvmExecutionAdapter } from "@/lib/execution/evm-execution-adapter";
 import { assertEvmExecutionRisk } from "@/lib/execution/live-execution-guard";
 import { copyAllocationPercent, resolveOwnedBaseUnitSell } from "@/lib/execution/execution-lot-math";
@@ -28,6 +28,7 @@ import { claimExecutionAttempt, createCopyExecutionKey, recordExecutionFailure, 
 import { inspectSolanaTokenSecurity } from "@/lib/services/token-quote-service";
 import { isWalletEligibleForCopy } from "@/lib/engine/wallet-copy-eligibility";
 import { queueTradeAdvisory } from "@/lib/services/ai-trade-advisor";
+import { resolveRobinhoodPortalMarket } from "@/lib/execution/robinhood-portal-route";
 
 export async function processCopyableSwap(
   chainId: ChainId,
@@ -115,7 +116,12 @@ export async function processCopyableSwap(
   }
 
   try {
-    const market = await getMarketDataProvider().getTokenMarket(chainId, observation.tokenAddress);
+    const market = await getMarketDataProvider().getTokenMarket(chainId, observation.tokenAddress).catch(async (error) => {
+      if (chainId !== "robinhood") throw error;
+      const portalMarket = await resolveRobinhoodPortalMarket(transaction, observation);
+      if (!portalMarket) throw error;
+      return portalMarket;
+    });
     const policy = store.getRiskSettings().assetPolicy!;
     const youngMarket = isYoungMarket(market, policy.youngPoolAgeMinutes);
     const trusted = policy.trustedAssets[chainId].some((asset) => normalizePolicyAsset(chainId, asset) === normalizePolicyAsset(chainId, observation.tokenAddress));
@@ -150,6 +156,16 @@ export async function processCopyableSwap(
       }
       const reason = `${market.tokenSymbol} yeni bir Pump.fun piyasası. Temkinli alım için en az 3 farklı cüzdan sinyali bekleniyor; şu an ${consensus?.distinctWalletCount ?? 1} sinyal var.`;
       const trade = mode === "paper" ? await recordSkippedPaperTrade({ chainId, side: observation.side, tokenAddress: observation.tokenAddress, tokenSymbol: market.tokenSymbol, priceUsd: market.priceUsd }, reason, context) : null;
+      if (mode !== "paper") {
+        await publishEvent({
+          chainId,
+          level: "info",
+          type: "swap",
+          title: `${market.tokenSymbol} için ek teyit bekleniyor`,
+          message: reason,
+          txHash: transaction.hash,
+        });
+      }
       store.recordWalletObservation(wallet.id, "swap", false);
       return trade;
     }
@@ -262,6 +278,11 @@ async function executeEvmCopyTrade(input: {
       chainId: input.chainId,
       side: input.observation.side,
       tokenAddress: getAddress(input.observation.tokenAddress),
+      preferredPairAddress: isAddress(input.market.pairAddress) ? getAddress(input.market.pairAddress) : undefined,
+      preferredVenue: input.market.marketKind,
+      referencePriceUsd: input.market.priceUsd,
+      tokenDecimals: input.observation.tokenDecimals,
+      portalExitRouteVerified: input.market.marketKind === "robinhood-portal" && input.market.exitRouteVerified === true,
       allocationPercent,
       exactSellAmount,
       slippagePercent: Math.min(0.75, networkLimit.maxSlippagePercent),
@@ -303,6 +324,11 @@ async function executeEvmCopyTrade(input: {
       : Number(formatUnits(executedAmount, input.observation.tokenDecimals));
     const quotedPriceUsd = tokenQuantity > 0 ? risk.estimatedTradeUsd / tokenQuantity : input.market.priceUsd;
     const priceImpactPercent = input.market.priceUsd > 0 ? Math.abs(quotedPriceUsd / input.market.priceUsd - 1) * 100 : 0;
+    const netProceedsUsd = input.observation.side === "sell"
+      ? Math.max(0, Number(formatEther(receivedAmount)) * risk.nativePriceUsd - networkFeeUsd)
+      : 0;
+    const costBasisUsd = input.observation.side === "sell" ? consumedCost(ownedLots, executedAmount.toString()) : 0;
+    const realizedPnlUsd = input.observation.side === "sell" ? netProceedsUsd - costBasisUsd : 0;
     store.updateExecutionAttempt(requestId, {
       status: input.mode === "shadow" ? "simulated" : "confirmed", amountIn: executedAmount, amountOut: receivedAmount,
       expectedAmountOut: plan.buyAmount.toString(), minimumAmountOut: plan.minBuyAmount.toString(),
@@ -311,12 +337,28 @@ async function executeEvmCopyTrade(input: {
       simulationLatencyMs, metadata: {
         ...quoteGuard,
         assetPolicy,
-        executionProvider: "provider" in plan ? plan.provider : "uniswap-v4",
+        executionProvider: "provider" in plan ? plan.provider : plan.venue,
         routeTool: "routeTool" in plan ? plan.routeTool : null,
         target: plan.transaction.to,
         nativePriceUsd: risk.nativePriceUsd,
         actualNetworkFeeNativeAmount: execution.networkFeeNativeAmount ?? null,
         estimatedNetworkFeeUsd: risk.gasFeeUsd,
+        tradeValueUsd: risk.estimatedTradeUsd,
+        tokenQuantity,
+        tokenAddress: input.observation.tokenAddress,
+        pairAddress: input.market.pairAddress,
+        marketPriceUsd: input.market.priceUsd,
+        marketCapUsd: input.market.marketCapUsd,
+        liquidityUsd: input.market.liquidityUsd,
+        volume24hUsd: input.market.volume24hUsd,
+        walletLabel: input.wallet.label,
+        sourceReference: input.transaction.hash,
+        ...(input.observation.side === "sell" ? {
+          costBasisUsd,
+          netProceedsUsd,
+          realizedPnlUsd,
+          realizedPnlPercent: costBasisUsd > 0 ? realizedPnlUsd / costBasisUsd * 100 : 0,
+        } : {}),
       },
       txHash: execution.txHash,
       externalOrderId: execution.externalOrderId,
@@ -336,10 +378,8 @@ async function executeEvmCopyTrade(input: {
       if (input.mode === "shadow") applyShadowBuy(input.chainId, entryCostUsd, networkFeeUsd + dexFeeUsd);
       if (input.consensus?.shouldCopy) store.finishExecutionBuyStage(input.mode, input.chainId, input.observation.tokenAddress, input.consensus.stage, true);
     } else {
-      const netProceedsUsd = Math.max(0, Number(formatEther(receivedAmount)) * risk.nativePriceUsd - networkFeeUsd);
-      const costBasisUsd = consumedCost(ownedLots, executedAmount.toString());
       store.reduceExecutionLots(ownedLots, executedAmount.toString(), { netProceedsUsd, feesUsd: networkFeeUsd + dexFeeUsd });
-      if (input.mode === "shadow") applyShadowSell(input.chainId, netProceedsUsd, netProceedsUsd - costBasisUsd, networkFeeUsd + dexFeeUsd);
+      if (input.mode === "shadow") applyShadowSell(input.chainId, netProceedsUsd, realizedPnlUsd, networkFeeUsd + dexFeeUsd);
     }
     store.markExecutionAccounted(requestId);
     if (input.mode === "live") await reconcileAfterLiveExecution(input.chainId, requestId);
@@ -425,12 +465,43 @@ async function executeSolanaCopyTrade(input: {
     const tokenQuantity = input.observation.side === "buy" ? Number(formatUnits(amountOut, input.observation.tokenDecimals)) : Number(formatUnits(amountIn, input.observation.tokenDecimals));
     const quotedPriceUsd = tokenQuantity > 0 ? tradeUsd / tokenQuantity : input.market.priceUsd;
     const priceImpactPercent = Number(plan.quote.priceImpactPct) * 100;
+    const netProceedsUsd = input.observation.side === "sell"
+      ? Math.max(0, Number(amountOut) / SOLANA_LAMPORTS_PER_SOL * nativeMarket.priceUsd - networkFeeUsd)
+      : 0;
+    const costBasisUsd = input.observation.side === "sell" ? consumedCost(ownedLots, amountIn.toString()) : 0;
+    const realizedPnlUsd = input.observation.side === "sell" ? netProceedsUsd - costBasisUsd : 0;
     store.updateExecutionAttempt(requestId, {
       status: input.mode === "shadow" ? "simulated" : "confirmed", amountIn, amountOut,
       expectedAmountOut: plan.quote.outAmount, minimumAmountOut: plan.quote.otherAmountThreshold,
       quotedPriceUsd, slippagePercent: plan.quote.slippageBps / 100, priceImpactPercent,
       networkFeeUsd, dexFeeUsd, availableBalanceUsd: input.mode === "shadow" ? store.getShadowAccount(chainId)?.cashBalanceUsd ?? 0 : 0,
-      simulationLatencyMs, metadata: { ...quoteGuard, assetPolicy, tradeValueUsd: tradeUsd, estimatedNetworkFeeUsd, actualNetworkFeeLamports, refundableRentLamports, refundableRentDepositUsd: refundableRentLamports / SOLANA_LAMPORTS_PER_SOL * nativeMarket.priceUsd, contextSlot: plan.quote.contextSlot, computeUnitLimit: plan.transaction.computeUnitLimit, shadowSimulation: plan.shadowSimulation },
+      simulationLatencyMs, metadata: {
+        ...quoteGuard,
+        assetPolicy,
+        tradeValueUsd: tradeUsd,
+        tokenQuantity,
+        tokenAddress: input.observation.tokenAddress,
+        pairAddress: input.market.pairAddress,
+        marketPriceUsd: input.market.priceUsd,
+        marketCapUsd: input.market.marketCapUsd,
+        liquidityUsd: input.market.liquidityUsd,
+        volume24hUsd: input.market.volume24hUsd,
+        walletLabel: input.wallet.label,
+        sourceReference: input.transaction.hash,
+        estimatedNetworkFeeUsd,
+        actualNetworkFeeLamports,
+        refundableRentLamports,
+        refundableRentDepositUsd: refundableRentLamports / SOLANA_LAMPORTS_PER_SOL * nativeMarket.priceUsd,
+        contextSlot: plan.quote.contextSlot,
+        computeUnitLimit: plan.transaction.computeUnitLimit,
+        shadowSimulation: plan.shadowSimulation,
+        ...(input.observation.side === "sell" ? {
+          costBasisUsd,
+          netProceedsUsd,
+          realizedPnlUsd,
+          realizedPnlPercent: costBasisUsd > 0 ? realizedPnlUsd / costBasisUsd * 100 : 0,
+        } : {}),
+      },
       txHash: execution.txHash,
       externalOrderId: execution.externalOrderId,
     });
@@ -448,10 +519,8 @@ async function executeSolanaCopyTrade(input: {
       if (input.mode === "shadow") applyShadowBuy(chainId, entryCostUsd, networkFeeUsd + dexFeeUsd);
       if (input.consensus?.shouldCopy) store.finishExecutionBuyStage(input.mode, chainId, input.observation.tokenAddress, input.consensus.stage, true);
     } else {
-      const netProceedsUsd = Math.max(0, Number(amountOut) / SOLANA_LAMPORTS_PER_SOL * nativeMarket.priceUsd - networkFeeUsd);
-      const costBasisUsd = consumedCost(ownedLots, amountIn.toString());
       store.reduceExecutionLots(ownedLots, amountIn.toString(), { netProceedsUsd, feesUsd: networkFeeUsd + dexFeeUsd });
-      if (input.mode === "shadow") applyShadowSell(chainId, netProceedsUsd, netProceedsUsd - costBasisUsd, networkFeeUsd + dexFeeUsd);
+      if (input.mode === "shadow") applyShadowSell(chainId, netProceedsUsd, realizedPnlUsd, networkFeeUsd + dexFeeUsd);
     }
     store.markExecutionAccounted(requestId);
     if (input.mode === "live") await reconcileAfterLiveExecution(chainId, requestId);

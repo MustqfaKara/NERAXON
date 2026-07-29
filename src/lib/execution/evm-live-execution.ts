@@ -1,10 +1,13 @@
 import {
   createWalletClient,
+  concatHex,
   defineChain,
+  encodeFunctionData,
   erc20Abi,
   formatEther,
   getAddress,
   isAddress,
+  numberToHex,
   parseAbi,
   parseUnits,
   type Address,
@@ -27,6 +30,13 @@ import { monitorService, recordServiceHealth } from "@/lib/services/service-heal
 import {
   assertExecutionContractPolicy,
   assertTrustedExecutionApi,
+  BASE_UNISWAP_V2_FACTORY,
+  BASE_UNISWAP_V2_ROUTER,
+  BASE_UNISWAP_V3_FACTORY,
+  BASE_UNISWAP_V3_QUOTER,
+  BASE_UNISWAP_V3_ROUTER,
+  BASE_WETH,
+  isLifiRouteUnavailable,
   isZeroExRouteUnavailable,
   validateLifiQuotePayload,
   type LifiQuoteResponse,
@@ -36,11 +46,37 @@ const NATIVE_TOKEN = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" as Address;
 const SUPPORTED_0X_CHAINS = new Set<EvmChainId>(["ethereum", "base"]);
 const CHAIN_NUMBERS: Record<EvmChainId, number> = { ethereum: 1, base: 8453, robinhood: 4663 };
 const ERC20_BALANCE_ABI = parseAbi(["function balanceOf(address owner) view returns (uint256)"]);
+const UNISWAP_V2_FACTORY_ABI = parseAbi(["function getPair(address tokenA, address tokenB) view returns (address pair)"]);
+const UNISWAP_V2_PAIR_ABI = parseAbi([
+  "function token0() view returns (address)",
+  "function token1() view returns (address)",
+  "function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
+]);
+const UNISWAP_V2_ROUTER_ABI = parseAbi([
+  "function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)",
+  "function swapExactTokensForETHSupportingFeeOnTransferTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline)",
+]);
+const UNISWAP_V3_FACTORY_ABI = parseAbi(["function getPool(address tokenA, address tokenB, uint24 fee) view returns (address pool)"]);
+const UNISWAP_V3_POOL_ABI = parseAbi([
+  "function factory() view returns (address)",
+  "function token0() view returns (address)",
+  "function token1() view returns (address)",
+  "function fee() view returns (uint24)",
+  "function liquidity() view returns (uint128)",
+]);
+const UNISWAP_V3_QUOTER_ABI = parseAbi([
+  "function quoteExactInput(bytes path, uint256 amountIn) returns (uint256 amountOut, uint160[] sqrtPriceX96AfterList, uint32[] initializedTicksCrossedList, uint256 gasEstimate)",
+]);
+const UNISWAP_V3_ROUTER_ABI = parseAbi([
+  "function exactInput((bytes path, address recipient, uint256 amountIn, uint256 amountOutMinimum) params) payable returns (uint256 amountOut)",
+]);
+const UNISWAP_V3_FEE_TIERS = [100, 500, 3_000, 10_000] as const;
 
 export interface EvmExecutionIntent {
   chainId: EvmChainId;
   side: TradeSide;
   tokenAddress: Address;
+  preferredPairAddress?: Address;
   allocationPercent?: number;
   sellPercent?: number;
   exactSellAmount?: bigint;
@@ -49,7 +85,7 @@ export interface EvmExecutionIntent {
 }
 
 export interface EvmExecutionQuote {
-  provider: "0x" | "lifi";
+  provider: "0x" | "lifi" | "uniswap-v2" | "uniswap-v3";
   routeTool: string | null;
   providerFeeUsd: number;
   chainId: EvmChainId;
@@ -84,6 +120,18 @@ interface ZeroExQuoteResponse {
   liquidityAvailable?: boolean;
   issues?: { allowance?: { spender?: string } | null };
   transaction?: { to?: string; data?: string; value?: string; gas?: string; gasPrice?: string };
+}
+
+interface ZeroExErrorResponse {
+  code?: string;
+  reason?: string;
+  message?: string;
+  validationErrors?: Array<{
+    field?: string;
+    code?: string;
+    reason?: string;
+    description?: string;
+  }>;
 }
 
 export function isZeroExLiveSupported(chainId: EvmChainId) {
@@ -122,9 +170,19 @@ export async function prepareEvmExecution(intent: EvmExecutionIntent): Promise<E
     return quote;
   } catch (error) {
     if (intent.chainId !== "base" || !isZeroExRouteUnavailable(error)) throw error;
-    const quote = await requestLifiQuote(intent, accountAddressNormalized, sellToken, buyToken, sellAmount);
-    await validateBuyExecution(quote);
-    return quote;
+    try {
+      const quote = await requestLifiQuote(intent, accountAddressNormalized, sellToken, buyToken, sellAmount);
+      await validateBuyExecution(quote);
+      return quote;
+    } catch (lifiError) {
+      if (!isLifiRouteUnavailable(lifiError)) throw lifiError;
+      if (intent.side === "buy") {
+        const quote = await requestBaseUniswapV3BuyQuote(intent, accountAddressNormalized, sellToken, buyToken, sellAmount);
+        await validateBuyExecution(quote);
+        return quote;
+      }
+      return requestBaseUniswapV2SellQuote(intent, accountAddressNormalized, sellToken, buyToken, sellAmount);
+    }
   }
 }
 
@@ -161,15 +219,39 @@ async function requestZeroExQuote(intent: EvmExecutionIntent, account: Address, 
       signal: AbortSignal.timeout(15_000),
       cache: "no-store",
     });
-    const payload = await response.json() as ZeroExQuoteResponse & { reason?: string; message?: string };
+    const payload = await readZeroExPayload(response);
     return { response, payload };
   });
   if (!result.response.ok) {
-    const error = new Error(`0x quote alınamadı (${result.response.status}): ${result.payload.reason ?? result.payload.message ?? "Bilinmeyen hata"}`);
+    const error = new Error(`0x quote alınamadı (${result.response.status}): ${describeZeroExError(result.payload)}`);
     if (!isZeroExRouteUnavailable(error)) recordServiceHealth("zeroex", 0, error.message);
     throw error;
   }
   return validateZeroExQuote(intent, account, sellToken, buyToken, sellAmount, result.payload);
+}
+
+async function readZeroExPayload(response: Response): Promise<ZeroExQuoteResponse & ZeroExErrorResponse> {
+  const body = await response.text();
+  if (!body.trim()) return {};
+  try {
+    return JSON.parse(body) as ZeroExQuoteResponse & ZeroExErrorResponse;
+  } catch {
+    return { message: body.trim().slice(0, 500) };
+  }
+}
+
+function describeZeroExError(payload: ZeroExErrorResponse) {
+  const headline = [payload.code, payload.reason, payload.message]
+    .find((value) => typeof value === "string" && value.trim())
+    ?.trim() ?? "Bilinmeyen hata";
+  const details = (payload.validationErrors ?? [])
+    .map((entry) => {
+      const reason = entry.reason?.trim() || entry.description?.trim() || entry.code?.trim();
+      if (!reason) return null;
+      return entry.field?.trim() ? `${entry.field}: ${reason}` : reason;
+    })
+    .filter((value): value is string => Boolean(value));
+  return details.length ? `${headline} · ${details.join(" · ")}` : headline;
 }
 
 async function requestLifiQuote(intent: EvmExecutionIntent, account: Address, sellToken: Address, buyToken: Address, sellAmount: bigint) {
@@ -197,6 +279,245 @@ async function requestLifiQuote(intent: EvmExecutionIntent, account: Address, se
     if (!response.ok) throw new Error(`LI.FI quote alınamadı (${response.status}): ${payload.message ?? payload.errors ?? "Bilinmeyen hata"}`);
     return validateLifiQuote(intent, account, sellToken, buyToken, sellAmount, payload);
   });
+}
+
+async function requestBaseUniswapV2SellQuote(
+  intent: EvmExecutionIntent,
+  account: Address,
+  sellToken: Address,
+  buyToken: Address,
+  sellAmount: bigint,
+): Promise<EvmExecutionQuote> {
+  if (intent.chainId !== "base" || intent.side !== "sell" || getAddress(buyToken) !== getAddress(NATIVE_TOKEN)) {
+    throw new Error("Doğrudan Uniswap V2 fallback yalnızca Base token satışlarında kullanılabilir.");
+  }
+  const publicClient = getPublicClient("base");
+  const pair = getAddress(await publicClient.readContract({
+    address: BASE_UNISWAP_V2_FACTORY,
+    abi: UNISWAP_V2_FACTORY_ABI,
+    functionName: "getPair",
+    args: [sellToken, BASE_WETH],
+  }));
+  if (pair === "0x0000000000000000000000000000000000000000") {
+    throw new Error("Token için resmî Base Uniswap V2 token/WETH havuzu bulunamadı.");
+  }
+  const [token0, token1, reserves, amounts] = await Promise.all([
+    publicClient.readContract({ address: pair, abi: UNISWAP_V2_PAIR_ABI, functionName: "token0" }),
+    publicClient.readContract({ address: pair, abi: UNISWAP_V2_PAIR_ABI, functionName: "token1" }),
+    publicClient.readContract({ address: pair, abi: UNISWAP_V2_PAIR_ABI, functionName: "getReserves" }),
+    publicClient.readContract({
+      address: BASE_UNISWAP_V2_ROUTER,
+      abi: UNISWAP_V2_ROUTER_ABI,
+      functionName: "getAmountsOut",
+      args: [sellAmount, [sellToken, BASE_WETH]],
+    }),
+  ]);
+  const pairTokens = new Set([getAddress(token0), getAddress(token1)]);
+  if (!pairTokens.has(getAddress(sellToken)) || !pairTokens.has(BASE_WETH) || reserves[0] <= 0n || reserves[1] <= 0n) {
+    throw new Error("Uniswap V2 havuz tokenleri veya rezervleri doğrulanamadı.");
+  }
+  const buyAmount = amounts[1] ?? 0n;
+  const slippageBps = BigInt(Math.max(1, Math.min(9_900, Math.round(intent.slippagePercent * 100))));
+  const minBuyAmount = buyAmount * (10_000n - slippageBps) / 10_000n;
+  if (buyAmount <= 0n || minBuyAmount <= 0n || minBuyAmount > buyAmount) {
+    throw new Error("Uniswap V2 çıkış miktarı güvenlik doğrulamasından geçmedi.");
+  }
+  try {
+    await publicClient.call({
+      account,
+      to: sellToken,
+      data: encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [pair, sellAmount] }),
+    });
+  } catch {
+    throw new Error("Token kontratı Uniswap havuzuna doğrudan transferi reddetti; token satışı kontrat seviyesinde kısıtlı olabilir.");
+  }
+  const transaction = {
+    to: BASE_UNISWAP_V2_ROUTER,
+    data: encodeFunctionData({
+      abi: UNISWAP_V2_ROUTER_ABI,
+      functionName: "swapExactTokensForETHSupportingFeeOnTransferTokens",
+      args: [sellAmount, minBuyAmount, [sellToken, BASE_WETH], account, BigInt(Math.floor(Date.now() / 1_000) + 300)],
+    }),
+    value: 0n,
+    gas: null,
+    gasPrice: null,
+  };
+  assertExecutionContractPolicy({
+    provider: "uniswap-v2",
+    sellToken,
+    transactionTarget: transaction.to,
+    allowanceSpender: BASE_UNISWAP_V2_ROUTER,
+  });
+  return {
+    provider: "uniswap-v2",
+    routeTool: `uniswap-v2:${pair}`,
+    providerFeeUsd: 0,
+    chainId: "base",
+    side: "sell",
+    account,
+    sellToken,
+    buyToken,
+    sellAmount,
+    buyAmount,
+    minBuyAmount,
+    allowanceSpender: BASE_UNISWAP_V2_ROUTER,
+    transaction,
+    quotedAt: new Date().toISOString(),
+  };
+}
+
+interface DexScreenerPair {
+  chainId?: string;
+  dexId?: string;
+  pairAddress?: string;
+  labels?: string[];
+  liquidity?: { usd?: number };
+  baseToken?: { address?: string };
+  quoteToken?: { address?: string };
+}
+
+async function requestBaseUniswapV3BuyQuote(
+  intent: EvmExecutionIntent,
+  account: Address,
+  sellToken: Address,
+  buyToken: Address,
+  sellAmount: bigint,
+): Promise<EvmExecutionQuote> {
+  if (intent.chainId !== "base" || intent.side !== "buy" || getAddress(sellToken) !== getAddress(NATIVE_TOKEN)) {
+    throw new Error("Doğrudan Uniswap V3 fallback yalnızca Base native token alımlarında kullanılabilir.");
+  }
+  const publicClient = getPublicClient("base");
+  const targetPool = await resolveBaseUniswapV3TargetPool(intent.preferredPairAddress, buyToken);
+  const [factory, poolToken0, poolToken1, targetFee, targetLiquidity] = await Promise.all([
+    publicClient.readContract({ address: targetPool, abi: UNISWAP_V3_POOL_ABI, functionName: "factory" }),
+    publicClient.readContract({ address: targetPool, abi: UNISWAP_V3_POOL_ABI, functionName: "token0" }),
+    publicClient.readContract({ address: targetPool, abi: UNISWAP_V3_POOL_ABI, functionName: "token1" }),
+    publicClient.readContract({ address: targetPool, abi: UNISWAP_V3_POOL_ABI, functionName: "fee" }),
+    publicClient.readContract({ address: targetPool, abi: UNISWAP_V3_POOL_ABI, functionName: "liquidity" }),
+  ]);
+  const targetTokens = new Set([getAddress(poolToken0), getAddress(poolToken1)]);
+  const bridgeToken = getAddress(poolToken0) === getAddress(buyToken) ? getAddress(poolToken1) : getAddress(poolToken0);
+  if (getAddress(factory) !== BASE_UNISWAP_V3_FACTORY
+    || !targetTokens.has(getAddress(buyToken))
+    || !targetTokens.has(bridgeToken)
+    || targetLiquidity <= 0n) {
+    throw new Error("Uniswap V3 hedef havuzu zincir doğrulamasından geçmedi.");
+  }
+
+  const pathParts: Array<{ token: Address; fee?: number }> = [{ token: BASE_WETH }];
+  const routePools = [targetPool];
+  if (bridgeToken !== BASE_WETH) {
+    const bridgePool = await findBestV3Pool(publicClient, BASE_WETH, bridgeToken);
+    if (!bridgePool) throw new Error("Uniswap V3 fallback için WETH ara havuzu bulunamadı.");
+    pathParts.push({ token: bridgeToken, fee: bridgePool.fee });
+    routePools.unshift(bridgePool.address);
+  }
+  pathParts.push({ token: getAddress(buyToken), fee: Number(targetFee) });
+  const path = encodeV3Path(pathParts);
+  const quoteResult = await publicClient.simulateContract({
+    address: BASE_UNISWAP_V3_QUOTER,
+    abi: UNISWAP_V3_QUOTER_ABI,
+    functionName: "quoteExactInput",
+    args: [path, sellAmount],
+  });
+  const buyAmount = quoteResult.result[0];
+  const slippageBps = BigInt(Math.max(1, Math.min(9_900, Math.round(intent.slippagePercent * 100))));
+  const minBuyAmount = buyAmount * (10_000n - slippageBps) / 10_000n;
+  if (buyAmount <= 0n || minBuyAmount <= 0n || minBuyAmount > buyAmount) {
+    throw new Error("Uniswap V3 çıkış miktarı güvenlik doğrulamasından geçmedi.");
+  }
+  const transaction = {
+    to: BASE_UNISWAP_V3_ROUTER,
+    data: encodeFunctionData({
+      abi: UNISWAP_V3_ROUTER_ABI,
+      functionName: "exactInput",
+      args: [{ path, recipient: account, amountIn: sellAmount, amountOutMinimum: minBuyAmount }],
+    }),
+    value: sellAmount,
+    gas: null,
+    gasPrice: null,
+  };
+  assertExecutionContractPolicy({
+    provider: "uniswap-v3",
+    sellToken,
+    transactionTarget: transaction.to,
+    allowanceSpender: null,
+  });
+  return {
+    provider: "uniswap-v3",
+    routeTool: `uniswap-v3:${routePools.join(">")}`,
+    providerFeeUsd: 0,
+    chainId: "base",
+    side: "buy",
+    account,
+    sellToken,
+    buyToken,
+    sellAmount,
+    buyAmount,
+    minBuyAmount,
+    allowanceSpender: null,
+    transaction,
+    quotedAt: new Date().toISOString(),
+  };
+}
+
+async function resolveBaseUniswapV3TargetPool(preferredPairAddress: Address | undefined, buyToken: Address) {
+  if (preferredPairAddress && isAddress(preferredPairAddress)) return getAddress(preferredPairAddress);
+  const response = await monitorService("dexscreener", () => fetch(
+    `https://api.dexscreener.com/token-pairs/v1/base/${buyToken}`,
+    { cache: "no-store", signal: AbortSignal.timeout(12_000) },
+  ));
+  if (!response.ok) throw new Error(`Uniswap V3 fallback piyasa verisi alınamadı (${response.status}).`);
+  const pairs = await response.json() as DexScreenerPair[];
+  const targetPair = pairs
+    .filter((pair) => pair.chainId === "base"
+      && pair.dexId === "uniswap"
+      && pair.labels?.some((label) => label.toLowerCase() === "v3")
+      && pair.pairAddress && isAddress(pair.pairAddress)
+      && samePairToken(pair, buyToken))
+    .sort((a, b) => Number(b.liquidity?.usd ?? 0) - Number(a.liquidity?.usd ?? 0))[0];
+  if (!targetPair?.pairAddress) throw new Error("Token için doğrulanabilir Base Uniswap V3 havuzu bulunamadı.");
+  return getAddress(targetPair.pairAddress);
+}
+
+async function findBestV3Pool(
+  publicClient: ReturnType<typeof getPublicClient>,
+  tokenA: Address,
+  tokenB: Address,
+) {
+  const candidates = await Promise.all(UNISWAP_V3_FEE_TIERS.map(async (fee) => {
+    const address = getAddress(await publicClient.readContract({
+      address: BASE_UNISWAP_V3_FACTORY,
+      abi: UNISWAP_V3_FACTORY_ABI,
+      functionName: "getPool",
+      args: [tokenA, tokenB, fee],
+    }));
+    if (address === "0x0000000000000000000000000000000000000000") return null;
+    const liquidity = await publicClient.readContract({ address, abi: UNISWAP_V3_POOL_ABI, functionName: "liquidity" });
+    return liquidity > 0n ? { address, fee, liquidity } : null;
+  }));
+  return candidates
+    .filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate))
+    .sort((a, b) => a.liquidity === b.liquidity ? 0 : a.liquidity > b.liquidity ? -1 : 1)[0] ?? null;
+}
+
+function encodeV3Path(parts: Array<{ token: Address; fee?: number }>): Hex {
+  const encoded: Hex[] = [parts[0].token];
+  for (let index = 1; index < parts.length; index += 1) {
+    const fee = parts[index].fee;
+    if (!fee) throw new Error("Uniswap V3 rota fee değeri eksik.");
+    encoded.push(numberToHex(fee, { size: 3 }), parts[index].token);
+  }
+  return concatHex(encoded);
+}
+
+function normalizePairToken(value: string | undefined): Address | null {
+  return value && isAddress(value) ? getAddress(value) : null;
+}
+
+function samePairToken(pair: DexScreenerPair, token: Address) {
+  return normalizePairToken(pair.baseToken?.address) === getAddress(token)
+    || normalizePairToken(pair.quoteToken?.address) === getAddress(token);
 }
 
 export async function executeEvmQuote(quote: EvmExecutionQuote, mode: "shadow" | "live", hooks?: ExecutionSubmissionHooks): Promise<EvmExecutionResult> {

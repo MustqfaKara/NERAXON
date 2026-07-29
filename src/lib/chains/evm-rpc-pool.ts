@@ -3,7 +3,11 @@ import type { EvmChainId, RpcEndpointInfo } from "@/lib/domain/types";
 import { readCredentialSync, type CredentialId } from "../security/credential-vault.ts";
 
 const DEFAULT_RPC_URLS: Record<EvmChainId, string[]> = {
-  ethereum: ["https://ethereum-rpc.publicnode.com"],
+  ethereum: [
+    "https://eth.blockscout.com/api/eth-rpc",
+    "https://eth.drpc.org",
+    "https://ethereum-rpc.publicnode.com",
+  ],
   base: ["https://mainnet.base.org", "https://base-rpc.publicnode.com"],
   robinhood: ["https://rpc.mainnet.chain.robinhood.com"],
 };
@@ -115,8 +119,12 @@ export async function fetchEvmRpcJson<T>(
         signal: AbortSignal.timeout(timeout),
         cache: "no-store",
       });
-      const payload = await response.json().catch(() => null);
-      const providerError = rpcProviderError(payload);
+      const responseText = await response.text();
+      const payload = parseRpcPayload(responseText);
+      const providerError = (!response.ok && payload === null && responseText.trim()
+        ? responseText.trim().slice(0, 500)
+        : rpcProviderError(payload))
+        ?? (!response.ok && responseText.trim() ? responseText.trim().slice(0, 500) : null);
       if (!response.ok || providerError) {
         const message = providerError ?? `RPC isteği başarısız (${response.status}).`;
         const error = new Error(message);
@@ -162,7 +170,10 @@ function availableRpcUrls(chainId: EvmChainId, method: string) {
 }
 
 function markRpcFailure(url: string, method: string, message: string, httpRateLimited = false) {
-  if (isMethodIncompatible(message)) unsupportedMethods.add(`${url}:${method}`);
+  if (isMethodIncompatible(message)) {
+    unsupportedMethods.add(`${url}:${method}`);
+    return;
+  }
   const current = endpointState.get(url) ?? { cooldownUntil: 0, failures: 0 };
   const failures = current.failures + 1;
   const cooldownMs = isMonthlyCapacityError(message)
@@ -191,6 +202,15 @@ function rpcProviderError(payload: unknown): string | null {
   return payload === null ? "RPC geçersiz JSON yanıtı döndürdü." : null;
 }
 
+function parseRpcPayload(value: string): unknown {
+  if (!value.trim()) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
 function isRateLimitError(message: string) {
   return /429|rate limit|too many|compute units|capacity/i.test(message);
 }
@@ -200,11 +220,11 @@ function isMonthlyCapacityError(message: string) {
 }
 
 function isFailoverError(message: string) {
-  return /429|rate limit|too many|compute units|capacity|timeout|timed out|temporar|unavailable|internal error|gateway|invalid json|block range|limit exceeded|query returned more|response size|method not found|please specify an address|dedicated full node/i.test(message);
+  return /429|rate limit|too many|compute units|capacity|timeout|timed out|temporar|unavailable|internal error|gateway|invalid json|block range|limit exceeded|query returned more|response size|method not found|does not support|please specify an address|dedicated full node|archive.*requests?.*(?:require|not available|unavailable|current plan)|historical (?:state|data).*(?:unavailable|unsupported)/i.test(message);
 }
 
 function isMethodIncompatible(message: string) {
-  return /method not found|please specify an address|dedicated full node/i.test(message);
+  return /method not found|does not support.*(?:method|eth_getlogs)|please specify an address|dedicated full node/i.test(message);
 }
 
 function rpcMethod(body: Record<string, unknown> | Array<Record<string, unknown>>) {

@@ -25,3 +25,24 @@ export function evaluateWalletActivityLimit(input: WalletActivityLimitInput): Wa
   }
   return { exceeded: false, reason: null };
 }
+
+type WalletActivitySettings = Pick<
+  RiskSettings,
+  | "maxWalletSwapsPerHour"
+  | "maxWalletSwapsPer24Hours"
+  | "hypercoreMaxWalletFillsPerHour"
+  | "hypercoreMaxWalletFillsPer24Hours"
+>;
+
+export function walletActivityLimitsFor(chainId: ChainId, settings: WalletActivitySettings) {
+  return chainId === "hyperliquid"
+    ? {
+        maxSwapsPerHour: settings.hypercoreMaxWalletFillsPerHour ?? 20,
+        maxSwapsPer24Hours: settings.hypercoreMaxWalletFillsPer24Hours ?? 100,
+      }
+    : {
+        maxSwapsPerHour: settings.maxWalletSwapsPerHour ?? 8,
+        maxSwapsPer24Hours: settings.maxWalletSwapsPer24Hours ?? 50,
+      };
+}
+import type { ChainId, RiskSettings } from "../domain/types.ts";

@@ -3,7 +3,7 @@ import { createInterface } from "node:readline/promises";
 import { userInfo } from "node:os";
 import { promisify } from "node:util";
 import { stdin, stdout } from "node:process";
-import { TelegramClient } from "teleproto";
+import { Api, TelegramClient } from "teleproto";
 import { StringSession } from "teleproto/sessions/index.js";
 
 const execFileAsync = promisify(execFile);
@@ -120,6 +120,39 @@ async function verifySession(apiId, apiHash, sessionValue) {
   }
 }
 
+async function listForumTopics(apiId, apiHash, sessionValue) {
+  const client = new TelegramClient(new StringSession(sessionValue), apiId, apiHash, {
+    connectionRetries: 5,
+    floodSleepThreshold: 30,
+  });
+  try {
+    await client.connect();
+    if (!await client.checkAuthorization()) throw new Error("Kaydedilmiş Telegram oturumu artık yetkili değil.");
+    const me = await client.getMe();
+    stdout.write(`Yetkili kullanıcı · ${String(me.id)}\n`);
+    const dialogs = await client.getDialogs({ limit: 500 });
+    const forums = dialogs.filter((dialog) => dialog.entity?.forum);
+    for (const dialog of forums) {
+      const peer = await client.getInputEntity(dialog.entity);
+      const result = await client.invoke(new Api.messages.GetForumTopics({
+        peer,
+        offsetDate: 0,
+        offsetId: 0,
+        offsetTopic: 0,
+        limit: 100,
+      }));
+      const chatId = String(dialog.id);
+      stdout.write(`${dialog.title || "İsimsiz forum"} · ${chatId}\n`);
+      for (const topic of result.topics) {
+        if (topic.className !== "ForumTopic") continue;
+        stdout.write(`  ${topic.title} · topic ${topic.id}\n`);
+      }
+    }
+  } finally {
+    await client.disconnect();
+  }
+}
+
 async function login(apiId, apiHash) {
   const readline = createInterface({ input: stdin, output: stdout });
   const client = new TelegramClient(new StringSession(""), apiId, apiHash, {
@@ -159,6 +192,10 @@ async function login(apiId, apiHash) {
 
 async function main() {
   const { apiId, apiHash } = await loadCredentials();
+  if (process.argv.includes("--forums")) {
+    await listForumTopics(apiId, apiHash, await readKeychain(SESSION_SERVICE));
+    return;
+  }
   if (process.argv.includes("--check")) {
     await verifySession(apiId, apiHash, await readKeychain(SESSION_SERVICE));
     return;

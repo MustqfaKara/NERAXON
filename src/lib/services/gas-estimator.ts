@@ -33,7 +33,7 @@ export async function estimatePaperGas(chainId: ChainId): Promise<GasEstimate> {
   }
   const [gasPrice, nativeMarket] = await Promise.all([
     getPublicClient(chainId).getGasPrice(),
-    getNativeMarketPrice(chainId),
+    getEvmNativeMarketPrice(chainId),
   ]);
   const gasUnits = MODELED_SWAP_GAS[chainId];
   const feeUsd = calculateGasFeeUsd(chainId, gasPrice, gasUnits, nativeMarket);
@@ -45,7 +45,7 @@ export async function estimatePaperGas(chainId: ChainId): Promise<GasEstimate> {
   };
 }
 
-async function getNativeMarketPrice(chainId: EvmChainId) {
+export async function getEvmNativeMarketPrice(chainId: EvmChainId) {
   if (chainId !== "robinhood") {
     return (await getMarketDataProvider().getTokenMarket(chainId, WRAPPED_ETH[chainId])).priceUsd;
   }

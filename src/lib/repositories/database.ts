@@ -395,6 +395,7 @@ function migrate(db: DatabaseSync) {
       initial_amount TEXT NOT NULL DEFAULT '0',
       amount_format TEXT NOT NULL,
       asset_symbol TEXT NOT NULL DEFAULT '',
+      pair_address TEXT,
       asset_decimals INTEGER NOT NULL DEFAULT 0,
       entry_price_usd REAL NOT NULL DEFAULT 0,
       current_price_usd REAL NOT NULL DEFAULT 0,
@@ -591,6 +592,7 @@ function migrate(db: DatabaseSync) {
   ensureColumns(db, "execution_lots", {
     initial_amount: "TEXT NOT NULL DEFAULT '0'",
     asset_symbol: "TEXT NOT NULL DEFAULT ''",
+    pair_address: "TEXT",
     asset_decimals: "INTEGER NOT NULL DEFAULT 0",
     entry_price_usd: "REAL NOT NULL DEFAULT 0",
     current_price_usd: "REAL NOT NULL DEFAULT 0",
@@ -810,6 +812,60 @@ function seed(db: DatabaseSync) {
   if (!scoreIndependentCopyMigrated) {
     db.exec("UPDATE wallets SET state = 'active' WHERE state = 'observing' AND total_trades >= 10");
     insertSetting.run(scoreIndependentCopyMigrationKey, JSON.stringify(true));
+  }
+  const favoriteGlobalTrackingMigrationKey = "migration.favoriteGlobalTrackingV1";
+  const favoriteGlobalTrackingMigrated = db.prepare("SELECT 1 FROM settings WHERE key = ?").get(favoriteGlobalTrackingMigrationKey);
+  if (!favoriteGlobalTrackingMigrated) {
+    db.prepare(`
+      UPDATE wallets
+      SET state = 'active', pause_reason = NULL, updated_at = ?
+      WHERE is_favorite = 1
+        AND state = 'paused'
+        AND COALESCE(pause_reason, '') NOT LIKE 'Kullanıcı tarafından manuel olarak duraklatıldı.%'
+    `).run(now);
+    db.exec(`
+      DELETE FROM wallet_swap_activity
+      WHERE wallet_id IN (SELECT id FROM wallets WHERE is_favorite = 1 AND state = 'active');
+    `);
+    insertSetting.run(favoriteGlobalTrackingMigrationKey, JSON.stringify(true));
+  }
+  const hypercoreAggressiveProfileMigrationKey = "migration.hypercoreAggressiveProfileV1";
+  const hypercoreAggressiveProfileMigrated = db.prepare("SELECT 1 FROM settings WHERE key = ?").get(hypercoreAggressiveProfileMigrationKey);
+  if (!hypercoreAggressiveProfileMigrated) {
+    const riskRow = db.prepare("SELECT value FROM settings WHERE key = 'riskSettings'").get() as { value: string };
+    const riskSettings = JSON.parse(riskRow.value) as Record<string, unknown>;
+    const limits = riskSettings.networkExecutionLimits as Record<string, Record<string, number>> | undefined;
+    riskSettings.hypercoreMaxWalletFillsPerHour = 20;
+    riskSettings.hypercoreMaxWalletFillsPer24Hours = 100;
+    riskSettings.maxHypercoreLeverage = Math.max(3, Number(riskSettings.maxHypercoreLeverage ?? 0));
+    riskSettings.maxLiveTradeUsd = Math.max(25, Number(riskSettings.maxLiveTradeUsd ?? 0));
+    if (limits?.hyperliquid) {
+      limits.hyperliquid = {
+        ...limits.hyperliquid,
+        minPositionPercent: 20,
+        maxPositionPercent: 35,
+        minTradeUsd: 10.5,
+        maxTradeUsd: 20,
+        dailyLossLimitPercent: 12,
+        cashReservePercent: 10,
+        maxOpenPositions: 4,
+        maxSlippagePercent: 1.5,
+        maxLeverage: 3,
+        maxQuoteAgeMs: 3_000,
+        maxBuyPriceDeviationPercent: 3,
+        maxSellPriceDeviationPercent: 6,
+        maxEmergencyExitDeviationPercent: 12,
+      };
+    }
+    db.prepare("UPDATE settings SET value = ? WHERE key = 'riskSettings'").run(JSON.stringify(riskSettings));
+    db.prepare(`
+      UPDATE wallets
+      SET state = 'active', pause_reason = NULL, updated_at = ?
+      WHERE state = 'paused'
+        AND tracked_chain_ids LIKE '%hyperliquid%'
+        AND pause_reason LIKE 'Son 1 saatte % swap görüldü; saatlik sınır 8.%'
+    `).run(now);
+    insertSetting.run(hypercoreAggressiveProfileMigrationKey, JSON.stringify(true));
   }
   insertSetting.run("dailyStartDate", JSON.stringify(new Date().toISOString().slice(0, 10)));
   insertSetting.run("dailyStartEquityUsd", JSON.stringify(DEFAULT_STARTING_BALANCE_USD));

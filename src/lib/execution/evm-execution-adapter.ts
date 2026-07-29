@@ -8,6 +8,11 @@ export interface EvmAdapterIntent {
   chainId: EvmChainId;
   side: TradeSide;
   tokenAddress: Address;
+  preferredPairAddress?: Address;
+  preferredVenue?: "amm" | "robinhood-portal";
+  referencePriceUsd?: number;
+  tokenDecimals?: number;
+  portalExitRouteVerified?: boolean;
   allocationPercent?: number;
   sellPercent?: number;
   exactSellAmount?: bigint;

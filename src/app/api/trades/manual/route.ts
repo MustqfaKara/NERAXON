@@ -119,12 +119,35 @@ export async function POST(request: Request) {
         const marketPriceUsd = quote?.market.priceUsd ?? position?.currentPriceUsd ?? 0;
         const quotedPriceUsd = tokenQuantity > 0 ? risk.estimatedTradeUsd / tokenQuantity : marketPriceUsd;
         const priceImpactPercent = marketPriceUsd > 0 ? Math.abs(quotedPriceUsd / marketPriceUsd - 1) * 100 : 0;
+        const netProceedsUsd = input.side === "sell"
+          ? Math.max(0, Number(formatEther(amountOut)) * risk.nativePriceUsd - risk.gasFeeUsd)
+          : 0;
+        const costBasisUsd = input.side === "sell" ? consumedCost(openLots, amountIn.toString()) : 0;
+        const realizedPnlUsd = input.side === "sell" ? netProceedsUsd - costBasisUsd : 0;
         store.updateExecutionAttempt(requestId, {
           status: mode === "shadow" ? "simulated" : "confirmed", amountIn, amountOut,
           expectedAmountOut: plan.buyAmount.toString(), minimumAmountOut: plan.minBuyAmount.toString(),
           quotedPriceUsd, slippagePercent: input.slippagePercent ?? 0.5, priceImpactPercent,
           networkFeeUsd: risk.gasFeeUsd, dexFeeUsd, availableBalanceUsd: mode === "shadow" ? store.getShadowAccount(input.chainId)?.cashBalanceUsd ?? 0 : 0,
-          simulationLatencyMs, metadata: { ...quoteGuard, assetPolicy, target: plan.transaction.to },
+          simulationLatencyMs, metadata: {
+            ...quoteGuard,
+            assetPolicy,
+            target: plan.transaction.to,
+            tradeValueUsd: risk.estimatedTradeUsd,
+            tokenQuantity,
+            tokenAddress: input.tokenAddress,
+            pairAddress: quote?.market.pairAddress ?? position?.pairAddress ?? null,
+            marketPriceUsd,
+            marketCapUsd: quote?.market.marketCapUsd ?? null,
+            liquidityUsd: quote?.market.liquidityUsd ?? null,
+            volume24hUsd: quote?.market.volume24hUsd ?? null,
+            ...(input.side === "sell" ? {
+              costBasisUsd,
+              netProceedsUsd,
+              realizedPnlUsd,
+              realizedPnlPercent: costBasisUsd > 0 ? realizedPnlUsd / costBasisUsd * 100 : 0,
+            } : {}),
+          },
           txHash: execution.txHash,
           externalOrderId: execution.externalOrderId,
         });
@@ -142,10 +165,8 @@ export async function POST(request: Request) {
           });
           if (mode === "shadow") applyShadowBuy(input.chainId, entryCostUsd, risk.gasFeeUsd + dexFeeUsd);
         } else {
-          const netProceedsUsd = Math.max(0, Number(formatEther(amountOut)) * risk.nativePriceUsd - risk.gasFeeUsd);
-          const costBasisUsd = consumedCost(openLots, amountIn.toString());
           store.reduceExecutionLots(openLots, amountIn.toString(), { netProceedsUsd, feesUsd: risk.gasFeeUsd + dexFeeUsd });
-          if (mode === "shadow") applyShadowSell(input.chainId, netProceedsUsd, netProceedsUsd - costBasisUsd, risk.gasFeeUsd + dexFeeUsd);
+          if (mode === "shadow") applyShadowSell(input.chainId, netProceedsUsd, realizedPnlUsd, risk.gasFeeUsd + dexFeeUsd);
         }
         store.markExecutionAccounted(requestId);
         if (mode === "live") await reconcileAfterLiveExecution(input.chainId, requestId);
@@ -251,12 +272,41 @@ async function executeSolanaManual(
     const tokenDecimals = quote?.decimals ?? 0;
     const tokenQuantity = input.side === "buy" ? Number(formatUnits(amountOut, tokenDecimals)) : Number(formatUnits(amountIn, tokenDecimals));
     const quotedPriceUsd = tokenQuantity > 0 ? tradeUsd / tokenQuantity : marketPriceUsd;
+    const netProceedsUsd = input.side === "sell"
+      ? Math.max(0, Number(amountOut) / SOLANA_LAMPORTS_PER_SOL * nativeMarket.priceUsd - networkFeeUsd)
+      : 0;
+    const costBasisUsd = input.side === "sell" ? consumedCost(openLots, amountIn.toString()) : 0;
+    const realizedPnlUsd = input.side === "sell" ? netProceedsUsd - costBasisUsd : 0;
     store.updateExecutionAttempt(requestId, {
       status: mode === "shadow" ? "simulated" : "confirmed", amountIn, amountOut,
       expectedAmountOut: plan.quote.outAmount, minimumAmountOut: plan.quote.otherAmountThreshold,
       quotedPriceUsd, slippagePercent: plan.quote.slippageBps / 100, priceImpactPercent: Number(plan.quote.priceImpactPct) * 100,
       networkFeeUsd, dexFeeUsd, availableBalanceUsd: mode === "shadow" ? store.getShadowAccount("solana")?.cashBalanceUsd ?? 0 : 0,
-      simulationLatencyMs, metadata: { ...quoteGuard, assetPolicy, tradeValueUsd: tradeUsd, estimatedNetworkFeeUsd, actualNetworkFeeLamports, refundableRentLamports, refundableRentDepositUsd: refundableRentLamports / SOLANA_LAMPORTS_PER_SOL * nativeMarket.priceUsd, contextSlot: plan.quote.contextSlot, computeUnitLimit: plan.transaction.computeUnitLimit, shadowSimulation: plan.shadowSimulation },
+      simulationLatencyMs, metadata: {
+        ...quoteGuard,
+        assetPolicy,
+        tradeValueUsd: tradeUsd,
+        tokenQuantity,
+        tokenAddress: input.tokenAddress,
+        pairAddress: quote?.market.pairAddress ?? position?.pairAddress ?? null,
+        marketPriceUsd,
+        marketCapUsd: quote?.market.marketCapUsd ?? null,
+        liquidityUsd: quote?.market.liquidityUsd ?? null,
+        volume24hUsd: quote?.market.volume24hUsd ?? null,
+        estimatedNetworkFeeUsd,
+        actualNetworkFeeLamports,
+        refundableRentLamports,
+        refundableRentDepositUsd: refundableRentLamports / SOLANA_LAMPORTS_PER_SOL * nativeMarket.priceUsd,
+        contextSlot: plan.quote.contextSlot,
+        computeUnitLimit: plan.transaction.computeUnitLimit,
+        shadowSimulation: plan.shadowSimulation,
+        ...(input.side === "sell" ? {
+          costBasisUsd,
+          netProceedsUsd,
+          realizedPnlUsd,
+          realizedPnlPercent: costBasisUsd > 0 ? realizedPnlUsd / costBasisUsd * 100 : 0,
+        } : {}),
+      },
       txHash: execution.txHash,
       externalOrderId: execution.externalOrderId,
     });
@@ -274,10 +324,8 @@ async function executeSolanaManual(
       });
       if (mode === "shadow") applyShadowBuy("solana", entryCostUsd, networkFeeUsd + dexFeeUsd);
     } else {
-      const netProceedsUsd = Math.max(0, Number(amountOut) / SOLANA_LAMPORTS_PER_SOL * nativeMarket.priceUsd - networkFeeUsd);
-      const costBasisUsd = consumedCost(openLots, amountIn.toString());
       store.reduceExecutionLots(openLots, amountIn.toString(), { netProceedsUsd, feesUsd: networkFeeUsd + dexFeeUsd });
-      if (mode === "shadow") applyShadowSell("solana", netProceedsUsd, netProceedsUsd - costBasisUsd, networkFeeUsd + dexFeeUsd);
+      if (mode === "shadow") applyShadowSell("solana", netProceedsUsd, realizedPnlUsd, networkFeeUsd + dexFeeUsd);
     }
     store.markExecutionAccounted(requestId);
     if (mode === "live") await reconcileAfterLiveExecution("solana", requestId);

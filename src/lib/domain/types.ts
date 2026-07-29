@@ -397,6 +397,8 @@ export interface RiskSettings {
   maxPriceChange24hPercent?: number;
   maxWalletSwapsPerHour?: number;
   maxWalletSwapsPer24Hours?: number;
+  hypercoreMaxWalletFillsPerHour?: number;
+  hypercoreMaxWalletFillsPer24Hours?: number;
   maxHypercoreLeverage?: number;
   maxLiveTradeUsd?: number;
   maxLiveGasUsd?: number;
@@ -569,6 +571,7 @@ export interface ExecutionLot {
   initialAmount: string;
   amountFormat: "base_units" | "decimal";
   assetSymbol: string;
+  pairAddress?: string | null;
   assetDecimals: number;
   entryPriceUsd: number;
   currentPriceUsd: number;
@@ -653,6 +656,9 @@ export interface ShadowPortfolioSummary extends ShadowAccount {
   positionUnrealizedPnlUsd: number;
   fundingTokenPnlUsd: number;
   executionRealizedPnlUsd?: number;
+  copyPnlUsd?: number;
+  nonCopyExecutionPnlUsd?: number;
+  accountResidualPnlUsd?: number;
   openPositionCount: number;
 }
 

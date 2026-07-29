@@ -13,6 +13,7 @@ import { assertAssetExecutionPolicy } from "@/lib/engine/asset-execution-policy"
 import type { ExecutionSubmissionHooks } from "@/lib/execution/execution-adapter";
 import { hypercoreClientOrderId } from "@/lib/services/execution-lifecycle";
 import { availableHypercoreSpotUsdc, effectiveHypercoreCollateralUsd, requiredPerpTransferAmount } from "@/lib/execution/hypercore-collateral";
+import { isHypercoreCrossMarginUnsupported } from "@/lib/execution/live-error-policy";
 
 interface ClearinghouseState {
   withdrawable?: string;
@@ -205,7 +206,7 @@ export async function executeHypercorePlan(plan: HypercoreExecutionPlan, mode: "
   const transport = new HttpTransport({ apiUrl: new URL(exchangeUrl).origin, timeout: 15_000 });
   const exchange = new ExchangeClient({ transport, wallet, defaultExpiresAfter: () => Date.now() + 10_000 });
   if (plan.marketType === "perp" && !plan.reduceOnly) {
-    await exchange.updateLeverage({ asset: plan.assetId, isCross: true, leverage: plan.leverage });
+    await configureHypercoreLeverage(exchange, plan.assetId, plan.leverage);
   }
   const clientOrderId = hypercoreClientOrderId(hooks?.idempotencyKey ?? `${plan.marketType}:${plan.coin}:${plan.quotedAt}`);
   await hooks?.onSubmitted({ externalOrderId: clientOrderId });
@@ -255,6 +256,21 @@ export async function executeHypercorePlan(plan: HypercoreExecutionPlan, mode: "
     };
   }
   throw new Error("HyperCore emrinin kesinleşme durumu çözümlenemedi.");
+}
+
+export async function configureHypercoreLeverage(
+  exchange: Pick<ExchangeClient, "updateLeverage">,
+  asset: number,
+  leverage: number,
+) {
+  try {
+    await exchange.updateLeverage({ asset, isCross: true, leverage });
+    return "cross" as const;
+  } catch (error) {
+    if (!isHypercoreCrossMarginUnsupported(error)) throw error;
+    await exchange.updateLeverage({ asset, isCross: false, leverage });
+    return "isolated" as const;
+  }
 }
 
 async function readSpotBalance(address: string, coin: string) {

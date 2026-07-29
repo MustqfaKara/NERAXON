@@ -110,3 +110,38 @@ test("Solana çok güçlü konsensüste 10000 USD altına inmez", () => {
   assert.equal(result.approved, false);
   assert.match(result.reason, /10000/);
 });
+
+test("Robinhood Portal likidite yerine doğrulanmış çift yönlü rota ve genç piyasa konsensüsü ister", () => {
+  const portalMarket = {
+    ...market,
+    chainId: "robinhood" as const,
+    liquidityUsd: 0,
+    marketKind: "robinhood-portal" as const,
+    exitRouteVerified: true,
+    pairCreatedAt: Date.now() - 5 * 60_000,
+  };
+  const withoutConsensus = evaluateAssetExecutionPolicy({
+    chainId: "robinhood",
+    asset: portalMarket.tokenAddress,
+    opensPosition: true,
+    settings,
+    safety,
+    market: portalMarket,
+    walletConfirmations: 1,
+    exitRouteVerified: true,
+  });
+  assert.equal(withoutConsensus.approved, false);
+
+  const approved = evaluateAssetExecutionPolicy({
+    chainId: "robinhood",
+    asset: portalMarket.tokenAddress,
+    opensPosition: true,
+    settings,
+    safety,
+    market: portalMarket,
+    walletConfirmations: 3,
+    exitRouteVerified: true,
+  });
+  assert.equal(approved.approved, true);
+  assert.ok(approved.checks.some((check) => check.label === "Robinhood Portal"));
+});

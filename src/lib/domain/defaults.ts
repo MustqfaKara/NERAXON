@@ -7,8 +7,8 @@ export const DEFAULT_STARTING_BALANCE_USD = Number(
 );
 
 export const DEFAULT_RISK_SETTINGS: RiskSettings = {
-  minPositionPercent: 8,
-  maxPositionPercent: 15,
+  minPositionPercent: 15,
+  maxPositionPercent: 25,
   dailyLossLimitPercent: 10,
   maxOpenPositions: 12,
   maxTokenExposurePercent: 20,
@@ -22,7 +22,9 @@ export const DEFAULT_RISK_SETTINGS: RiskSettings = {
   maxPriceChange24hPercent: 80,
   maxWalletSwapsPerHour: 8,
   maxWalletSwapsPer24Hours: 50,
-  maxHypercoreLeverage: 2,
+  hypercoreMaxWalletFillsPerHour: 20,
+  hypercoreMaxWalletFillsPer24Hours: 100,
+  maxHypercoreLeverage: 3,
   maxLiveTradeUsd: 25,
   maxLiveGasUsd: 5,
   networkFeeLimits: {
@@ -33,11 +35,11 @@ export const DEFAULT_RISK_SETTINGS: RiskSettings = {
     hyperliquid: { maxFeeUsd: 0.05, maxFeePercent: 2 },
   },
   networkExecutionLimits: {
-    ethereum: { minPositionPercent: 8, maxPositionPercent: 15, minTradeUsd: 0, maxTradeUsd: 5, dailyLossLimitPercent: 10, cashReservePercent: 15, maxOpenPositions: 4, maxSlippagePercent: 2, maxLeverage: 1, maxQuoteAgeMs: 8_000, maxBuyPriceDeviationPercent: 3, maxSellPriceDeviationPercent: 6, maxEmergencyExitDeviationPercent: 12 },
-    base: { minPositionPercent: 8, maxPositionPercent: 15, minTradeUsd: 0, maxTradeUsd: 5, dailyLossLimitPercent: 10, cashReservePercent: 15, maxOpenPositions: 4, maxSlippagePercent: 2, maxLeverage: 1, maxQuoteAgeMs: 8_000, maxBuyPriceDeviationPercent: 3, maxSellPriceDeviationPercent: 6, maxEmergencyExitDeviationPercent: 12 },
-    robinhood: { minPositionPercent: 8, maxPositionPercent: 15, minTradeUsd: 0, maxTradeUsd: 5, dailyLossLimitPercent: 10, cashReservePercent: 15, maxOpenPositions: 4, maxSlippagePercent: 2, maxLeverage: 1, maxQuoteAgeMs: 8_000, maxBuyPriceDeviationPercent: 3, maxSellPriceDeviationPercent: 6, maxEmergencyExitDeviationPercent: 12 },
-    solana: { minPositionPercent: 8, maxPositionPercent: 15, minTradeUsd: 0, maxTradeUsd: 5, dailyLossLimitPercent: 10, cashReservePercent: 15, maxOpenPositions: 4, maxSlippagePercent: 3, maxLeverage: 1, maxQuoteAgeMs: 5_000, maxBuyPriceDeviationPercent: 5, maxSellPriceDeviationPercent: 8, maxEmergencyExitDeviationPercent: 12 },
-    hyperliquid: { minPositionPercent: 8, maxPositionPercent: 15, minTradeUsd: 10.5, maxTradeUsd: 12, dailyLossLimitPercent: 10, cashReservePercent: 15, maxOpenPositions: 2, maxSlippagePercent: 1.5, maxLeverage: 2, maxQuoteAgeMs: 3_000, maxBuyPriceDeviationPercent: 2, maxSellPriceDeviationPercent: 5, maxEmergencyExitDeviationPercent: 12 },
+    ethereum: { minPositionPercent: 15, maxPositionPercent: 25, minTradeUsd: 0, maxTradeUsd: 5, dailyLossLimitPercent: 10, cashReservePercent: 15, maxOpenPositions: 4, maxSlippagePercent: 2, maxLeverage: 1, maxQuoteAgeMs: 8_000, maxBuyPriceDeviationPercent: 3, maxSellPriceDeviationPercent: 6, maxEmergencyExitDeviationPercent: 12 },
+    base: { minPositionPercent: 15, maxPositionPercent: 25, minTradeUsd: 0, maxTradeUsd: 5, dailyLossLimitPercent: 10, cashReservePercent: 15, maxOpenPositions: 4, maxSlippagePercent: 2, maxLeverage: 1, maxQuoteAgeMs: 8_000, maxBuyPriceDeviationPercent: 3, maxSellPriceDeviationPercent: 6, maxEmergencyExitDeviationPercent: 12 },
+    robinhood: { minPositionPercent: 15, maxPositionPercent: 25, minTradeUsd: 0, maxTradeUsd: 5, dailyLossLimitPercent: 10, cashReservePercent: 15, maxOpenPositions: 4, maxSlippagePercent: 2, maxLeverage: 1, maxQuoteAgeMs: 8_000, maxBuyPriceDeviationPercent: 3, maxSellPriceDeviationPercent: 6, maxEmergencyExitDeviationPercent: 12 },
+    solana: { minPositionPercent: 15, maxPositionPercent: 25, minTradeUsd: 0, maxTradeUsd: 5, dailyLossLimitPercent: 10, cashReservePercent: 15, maxOpenPositions: 4, maxSlippagePercent: 3, maxLeverage: 1, maxQuoteAgeMs: 5_000, maxBuyPriceDeviationPercent: 5, maxSellPriceDeviationPercent: 8, maxEmergencyExitDeviationPercent: 12 },
+    hyperliquid: { minPositionPercent: 20, maxPositionPercent: 35, minTradeUsd: 10.5, maxTradeUsd: 20, dailyLossLimitPercent: 12, cashReservePercent: 10, maxOpenPositions: 4, maxSlippagePercent: 1.5, maxLeverage: 3, maxQuoteAgeMs: 3_000, maxBuyPriceDeviationPercent: 3, maxSellPriceDeviationPercent: 6, maxEmergencyExitDeviationPercent: 12 },
   },
   assetPolicy: {
     minimumSafetyScore: 55,

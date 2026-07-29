@@ -12,6 +12,20 @@ export function evaluateTokenSafety(market: MarketSnapshot, options: { allowYoun
   const warnings: string[] = [];
   const checks: TokenSafetyResult["checks"] = [];
   if (market.priceUsd <= 0) return reject("Token için güvenilir USD fiyatı bulunamadı.");
+  if (market.marketKind === "robinhood-portal") {
+    if (!market.exitRouteVerified) return reject("Robinhood Portal satış rotası doğrulanamadı.");
+    warnings.push("Varlık AMM havuzu yerine Robinhood Portal rotasıyla fiyatlanıyor.");
+    checks.push({ label: "Portal fiyatı", status: "passed", detail: "Kaynak işlemin gerçekleşen zincir üstü fiyatından doğrulandı." });
+    checks.push({ label: "Satış rotası", status: "passed", detail: "Portal router satış rotası zincir üstünde doğrulandı." });
+    checks.push({ label: "AMM likiditesi", status: "warning", detail: "Bu varlık için klasik AMM havuzu bulunmuyor; pozisyon azaltılmış büyüklükle sınırlandırılır." });
+    return {
+      approved: true,
+      warnings,
+      reason: warnings.join(" "),
+      score: 78,
+      checks,
+    };
+  }
   if (market.liquidityUsd <= 0) return reject("Token havuzunda doğrulanabilir likidite bulunamadı.");
   checks.push({ label: "Piyasa fiyatı", status: "passed", detail: "Likiditeli havuzdan doğrulandı." });
   checks.push({ label: "Likidite", status: market.liquidityUsd >= 50_000 ? "passed" : "warning", detail: `${market.liquidityUsd.toFixed(0)} USD havuz likiditesi.` });
@@ -32,7 +46,7 @@ export function evaluateTokenSafety(market: MarketSnapshot, options: { allowYoun
   checks.push({ label: "İşlem akışı", status: buys24h > 0 && sells24h > 0 ? "passed" : "warning", detail: `24 saatte ${buys24h} alım, ${sells24h} satış.` });
   const sellRatio = buys24h ? sells24h / buys24h : 0;
   if (buys24h >= 20 && sellRatio < 0.03) warnings.push("Satış akışı alımlara göre olağandışı düşük; honeypot riski ayrıca doğrulanmalı.");
-  checks.push({ label: "Satılabilirlik sinyali", status: buys24h >= 20 && sellRatio < 0.03 ? "warning" : "passed", detail: "DEX işlem akışından davranışsal kontrol." });
+  checks.push({ label: "DEX satış akışı", status: buys24h >= 20 && sellRatio < 0.03 ? "warning" : "passed", detail: "Yalnızca davranışsal sinyaldir; kontrat satılabilirlik kanıtı değildir." });
   const score = Math.max(0, 100 - warnings.length * 12 - checks.filter((check) => check.status === "warning").length * 5);
 
   return {

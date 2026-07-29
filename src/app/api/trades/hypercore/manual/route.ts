@@ -82,6 +82,16 @@ export async function POST(request: Request) {
         const simulationLatencyMs = Math.round(performance.now() - simulationStartedAt);
         const executionPriceUsd = execution.averagePriceUsd ?? Number(plan.limitPrice);
         const feeUsd = execution.executionFeeUsd ?? estimatedFeeUsd;
+        const executedQuantity = Number(execution.executedAmount);
+        const displayedQuantity = input.action === "open" && plan.marketType === "spot"
+          ? Number(execution.receivedAmount)
+          : executedQuantity;
+        const costBasisUsd = input.action === "close" ? consumedCost(openLots, execution.executedAmount) : 0;
+        const closePnlUsd = input.action === "close"
+          ? closePnl(openLots, executedQuantity, executionPriceUsd, input.positionSide)
+          : 0;
+        const netProceedsUsd = input.action === "close" ? Math.max(0, costBasisUsd + closePnlUsd - feeUsd) : 0;
+        const realizedPnlUsd = input.action === "close" ? netProceedsUsd - costBasisUsd : 0;
         store.updateExecutionAttempt(requestId, {
           status: mode === "shadow" ? "simulated" : "confirmed", amountIn: execution.executedAmount, amountOut: execution.receivedAmount,
           expectedAmountOut: plan.size, minimumAmountOut: plan.size, quotedPriceUsd: Number(plan.limitPrice),
@@ -97,6 +107,17 @@ export async function POST(request: Request) {
             minimumTradableNotionalUsd: plan.minimumTradableNotionalUsd,
             averageFillPriceUsd: execution.averagePriceUsd ?? null,
             actualExecutionFeeUsd: execution.executionFeeUsd ?? null,
+            tradeValueUsd: plan.notionalUsd,
+            tokenQuantity: displayedQuantity,
+            marketPriceUsd: plan.referencePriceUsd,
+            liquidityUsd: plan.openInterestUsd,
+            volume24hUsd: plan.volume24hUsd,
+            ...(input.action === "close" ? {
+              costBasisUsd,
+              netProceedsUsd,
+              realizedPnlUsd,
+              realizedPnlPercent: costBasisUsd > 0 ? realizedPnlUsd / costBasisUsd * 100 : 0,
+            } : {}),
           },
           txHash: execution.externalOrderId ? `hyperliquid:${execution.externalOrderId}` : null,
           externalOrderId: execution.externalOrderId,
@@ -118,11 +139,8 @@ export async function POST(request: Request) {
           });
           if (mode === "shadow") applyShadowBuy("hyperliquid", entryCostUsd, feeUsd);
         } else {
-          const costBasisUsd = consumedCost(openLots, execution.executedAmount);
-          const pnlUsd = closePnl(openLots, Number(execution.executedAmount), executionPriceUsd, input.positionSide);
-          const netProceedsUsd = Math.max(0, costBasisUsd + pnlUsd - feeUsd);
           store.reduceExecutionLots(openLots, execution.executedAmount, { netProceedsUsd, feesUsd: feeUsd }, 10 ** -plan.sizeDecimals);
-          if (mode === "shadow") applyShadowSell("hyperliquid", netProceedsUsd, netProceedsUsd - costBasisUsd, feeUsd);
+          if (mode === "shadow") applyShadowSell("hyperliquid", netProceedsUsd, realizedPnlUsd, feeUsd);
         }
         store.markExecutionAccounted(requestId);
         if (mode === "live") await reconcileAfterLiveExecution("hyperliquid", requestId);

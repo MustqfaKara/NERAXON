@@ -1,5 +1,6 @@
 import type { CircuitBreakerState } from "@/lib/domain/types";
 import { store } from "@/lib/repositories/store";
+import { isRecoverableRpcMonitoringError } from "@/lib/chains/runtime-error-policy";
 
 export function recordOperationalSuccess() {
   const current = store.getCircuitBreaker();
@@ -31,7 +32,7 @@ export function resetCircuitBreaker() {
 
 export function isRecoverableOperationalHalt(state: CircuitBreakerState) {
   if (!state.halted || !state.reason) return false;
-  return /fetch failed|HTTP request failed|RPC|WebSocket|timeout|zaman aşımı|gecikmesi/i.test(state.reason);
+  return isRecoverableRpcMonitoringError(state.reason);
 }
 
 function save(state: CircuitBreakerState) {

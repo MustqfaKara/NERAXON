@@ -9,11 +9,12 @@ import { solanaRpc } from "@/lib/solana/helius-client";
 import { SOLANA_LAMPORTS_PER_SOL, SOLANA_NATIVE_MINT, SOLANA_TOKEN_2022_PROGRAM_ID, SOLANA_TOKEN_PROGRAM_ID } from "@/lib/solana/constants";
 import { getExecutionAccount } from "@/lib/services/execution-account-service";
 import { getNetworkExecutionLimit } from "@/lib/execution/network-execution-risk";
-import { calculateLiveAccountPnl, calculatePortfolioEquity, executionLotValueUsd, remainingExecutionCost, resolveExposureLimitUsd } from "@/lib/engine/execution-accounting-math";
+import { calculateLiveAccountPnl, calculatePortfolioEquity, executionLotValueUsd, remainingExecutionCost, resolveExposureLimitUsd, shouldInitializeLiveFundingBaseline } from "@/lib/engine/execution-accounting-math";
 import { calculateHypercoreAccountValues } from "@/lib/engine/hypercore-live-accounting";
 import { LIVE_PILOT_INTEGRATION_IDS } from "@/lib/domain/integrations";
 import { resolveLivePositionLimit } from "@/lib/engine/live-position-capacity";
 import { executionLotNetPnl } from "@/lib/engine/execution-wallet-performance";
+import { hypercoreExternalCapitalFlowUsd, type HypercoreLedgerUpdate } from "@/lib/engine/hypercore-capital-flow";
 
 interface ClearinghouseState {
   withdrawable?: string;
@@ -55,14 +56,46 @@ async function getLiveNetworkPortfolio(chainId: ChainId): Promise<ShadowPortfoli
     0,
   );
   const executionRealizedPnlUsd = lots.reduce((sum, lot) => sum + executionLotNetPnl(lot), 0);
+  const copyPnlUsd = lots
+    .filter((lot) => lot.source === "copy")
+    .reduce((sum, lot) => sum + executionLotNetPnl(lot), 0);
+  const nonCopyExecutionPnlUsd = executionRealizedPnlUsd - copyPnlUsd;
   const confirmedAttempts = store.listExecutionAttempts(10_000)
     .filter((attempt) => attempt.mode === "live" && attempt.integrationId === chainId && attempt.status === "confirmed");
   const networkCostsUsd = confirmedAttempts.reduce((sum, attempt) => sum + attempt.networkFeeUsd, 0);
   const dexCostsUsd = confirmedAttempts.reduce((sum, attempt) => sum + attempt.dexFeeUsd, 0);
   const totalCostsUsd = networkCostsUsd + dexCostsUsd;
   const today = new Date().toISOString().slice(0, 10);
-  const dailyStartEquityUsd = store.getOrCreateLiveDailyBaseline(chainId, today, details.equityUsd);
-  const startingEquityUsd = store.getLiveInitialBaseline(chainId, dailyStartEquityUsd);
+  let dailyStartEquityUsd = store.getOrCreateLiveDailyBaseline(chainId, today, details.equityUsd);
+  let startingEquityUsd = store.getLiveInitialBaseline(chainId, dailyStartEquityUsd);
+  if (shouldInitializeLiveFundingBaseline({
+    initialEquityUsd: startingEquityUsd,
+    currentEquityUsd: details.equityUsd,
+    hasExecutionHistory: lots.length > 0 || confirmedAttempts.length > 0,
+  })) {
+    store.initializeLiveFundingBaselines(chainId, today, details.equityUsd);
+    dailyStartEquityUsd = store.getOrCreateLiveDailyBaseline(chainId, today, details.equityUsd);
+    startingEquityUsd = store.getLiveInitialBaseline(chainId, details.equityUsd);
+  }
+  if (chainId === "hyperliquid") {
+    const initialBaseline = store.getLiveInitialBaselineRecord(chainId);
+    const dailyBaseline = store.getLiveDailyBaselineRecord(chainId, today);
+    if (initialBaseline && dailyBaseline) {
+      const account = getExecutionAccount("hyperliquid");
+      if (!account) throw new Error("Hyperliquid hesap adresi yapılandırılmadı.");
+      const initialSinceMs = new Date(initialBaseline.createdAt).getTime();
+      const dailySinceMs = new Date(dailyBaseline.createdAt).getTime();
+      const ledger = await hypercoreInfo<HypercoreLedgerUpdate[]>({
+        type: "userNonFundingLedgerUpdates",
+        user: account,
+        startTime: Math.min(initialSinceMs, dailySinceMs),
+      });
+      startingEquityUsd = initialBaseline.equityUsd
+        + hypercoreExternalCapitalFlowUsd(ledger, account, initialSinceMs);
+      dailyStartEquityUsd = dailyBaseline.equityUsd
+        + hypercoreExternalCapitalFlowUsd(ledger, account, dailySinceMs);
+    }
+  }
   const pnl = calculateLiveAccountPnl({
     equityUsd: details.equityUsd,
     initialEquityUsd: startingEquityUsd,
@@ -79,6 +112,9 @@ async function getLiveNetworkPortfolio(chainId: ChainId): Promise<ShadowPortfoli
     fundingTokenPriceUsd: details.fundingTokenPriceUsd,
     realizedPnlUsd: pnl.realizedPnlUsd,
     executionRealizedPnlUsd,
+    copyPnlUsd,
+    nonCopyExecutionPnlUsd,
+    accountResidualPnlUsd: pnl.accountDifferenceUsd,
     totalCostsUsd,
     reservedBalanceUsd: details.reservedBalanceUsd,
     networkCostsUsd,

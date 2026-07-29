@@ -95,9 +95,16 @@ npm run typecheck
 npm run lint
 npm test
 npm run telegram:check
+npm run telegram:forums
 ```
 
 Both `npm run dev` and `npm start` bind only to `127.0.0.1`.
+
+## Telegram Operator Commands
+
+NERAXON can accept authenticated operator commands inside one configured Telegram forum topic. Set `TELEGRAM_INFO_TOPIC_ID` and `TELEGRAM_ALLOWED_USER_ID` locally; commands from other topics, chats, or users are ignored.
+
+Read-only commands include `/balance`, `/pnl`, `/positions`, `/status`, `/recent`, `/limits`, and `/quote`. Live actions use `/buy`, `/sell`, `/sellall`, `/pause`, and `/resume`. Every trade requires an inline confirmation within 60 seconds and still passes through the same execution, safety, fee, slippage, exposure, and daily-loss controls as the dashboard.
 
 ## Architecture
 

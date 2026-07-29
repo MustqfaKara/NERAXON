@@ -11,6 +11,7 @@ import {
   remainingExecutionCost,
   resolveExposureLimitUsd,
   executionLotHasRealizedOutcome,
+  shouldInitializeLiveFundingBaseline,
 } from "../src/lib/engine/execution-accounting-math.ts";
 import {
   INTEGRATION_CATALOG,
@@ -109,6 +110,27 @@ test("portföy özsermayesi likit, pozisyon ve iade edilebilir rezervden oluşur
   assert.equal(calculatePortfolioEquity(8.39, 0.632, 0.319).toFixed(3), "9.341");
 });
 
+test("boş canlı hesaba gelen ilk finansman PnL yerine başlangıç sermayesi olur", () => {
+  assert.equal(shouldInitializeLiveFundingBaseline({
+    initialEquityUsd: 0,
+    currentEquityUsd: 18.75,
+    hasExecutionHistory: false,
+  }), true);
+});
+
+test("işlem geçmişi bulunan hesaptaki bakiye değişimi başlangıç sermayesini sıfırlamaz", () => {
+  assert.equal(shouldInitializeLiveFundingBaseline({
+    initialEquityUsd: 0,
+    currentEquityUsd: 18.75,
+    hasExecutionHistory: true,
+  }), false);
+  assert.equal(shouldInitializeLiveFundingBaseline({
+    initialEquityUsd: 9.5,
+    currentEquityUsd: 18.75,
+    hasExecutionHistory: false,
+  }), false);
+});
+
 test("açıklanamayan bakiye farkı gerçekleşen ve açık PnL'den ayrı tutulur", () => {
   assert.equal(calculateBalanceDifference({
     equityUsd: 9.341,
@@ -131,4 +153,18 @@ test("canlı net PnL günlük sıfırlama yerine ilk yatırılan özsermayeyi ku
   assert.equal(result.realizedPnlUsd.toFixed(4), "-3.0016");
   assert.equal(result.dailyPnlUsd.toFixed(4), "-0.3082");
   assert.equal(result.accountDifferenceUsd.toFixed(4), "-1.4211");
+});
+
+test("hesap farkında açık pozisyon PnL değerini ikinci kez düşmez", () => {
+  const result = calculateLiveAccountPnl({
+    equityUsd: 11,
+    initialEquityUsd: 10,
+    dailyStartEquityUsd: 10,
+    executionRealizedPnlUsd: 0.8,
+    unrealizedPnlUsd: 0.5,
+  });
+
+  assert.equal(result.totalPnlUsd, 1);
+  assert.equal(result.realizedPnlUsd, 0.5);
+  assert.equal(result.accountDifferenceUsd.toFixed(2), "0.20");
 });

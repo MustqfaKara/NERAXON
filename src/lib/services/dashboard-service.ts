@@ -52,7 +52,7 @@ export async function refreshDashboardMarkets(view?: DashboardViewId): Promise<D
   }));
 
   if (hypercorePositions.length) {
-    const markets = await getHypercoreMarkets(true);
+    const markets = await getHypercoreMarkets();
     for (const position of hypercorePositions) {
       const market = findHypercoreMarket(markets, position.marketType, position.coin);
       if (!market) continue;

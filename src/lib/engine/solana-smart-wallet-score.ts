@@ -1,4 +1,5 @@
 import type { DiscoveryScoreBreakdown } from "../domain/types.ts";
+import { isDiscoveryReturnEligible } from "./discovery-pnl.ts";
 
 export interface SolanaSmartWalletMetrics {
   trades24h: number;
@@ -37,13 +38,13 @@ export function solanaSmartWalletHistoryRejectionReasons(metrics: Pick<SolanaSma
 >) {
   const reasons: string[] = [];
   if (metrics.invested7dUsd > 250_000) reasons.push("whale_capital");
-  if (metrics.uniqueTokens7d < 2) reasons.push("low_diversity");
-  if (metrics.closedTokens7d < 2) reasons.push("low_closed_sample");
-  if (metrics.winRate7d < 50) reasons.push("low_win_rate");
-  if (metrics.realizedPnl7dUsd < 100) reasons.push("low_realized_pnl");
+  if (metrics.closedTokens7d < 1) reasons.push("low_closed_sample");
+  if (metrics.realizedPnl7dUsd <= 0) reasons.push("low_realized_pnl");
   if (metrics.totalPnl7dUsd < 100) reasons.push("low_total_pnl");
-  if (metrics.realizedRoi7dPercent < 5 || metrics.realizedRoi7dPercent > 500) reasons.push("invalid_roi");
-  if (metrics.unrealizedPnl7dUsd < -Math.max(100, metrics.realizedPnl7dUsd * 0.4)) reasons.push("open_drawdown");
+  if (!isDiscoveryReturnEligible(metrics.invested7dUsd, metrics.totalPnl7dUsd)) reasons.push("low_return_multiple");
+  if (!Number.isFinite(metrics.realizedRoi7dPercent)
+    || metrics.realizedRoi7dPercent <= 0
+    || metrics.realizedRoi7dPercent > 1_000) reasons.push("invalid_roi");
   if (metrics.suspiciousTagCount > 0) reasons.push("suspicious_tags");
   return reasons;
 }

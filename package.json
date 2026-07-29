@@ -20,7 +20,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --no-warnings --test --experimental-strip-types tests/*.test.ts",
     "telegram:login": "node scripts/telegram-user-auth.mjs",
-    "telegram:check": "node scripts/telegram-user-auth.mjs --check"
+    "telegram:check": "node scripts/telegram-user-auth.mjs --check",
+    "telegram:forums": "node scripts/telegram-user-auth.mjs --forums"
   },
   "dependencies": {
     "@nktkas/hyperliquid": "^0.32.2",

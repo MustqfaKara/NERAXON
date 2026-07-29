@@ -58,13 +58,22 @@ export function evaluateAssetExecutionPolicy(input: {
     return reject(asset, false, false, false, Boolean(input.exitRouteVerified), `Token güvenlik skoru ${policy.minimumSafetyScore} sınırının altında.`, checks);
   }
   const minimumLiquidityUsd = resolveMinimumLiquidityUsd(input);
-  if (!trusted && input.market && input.market.liquidityUsd < minimumLiquidityUsd) {
+  const verifiedPortalMarket = input.chainId === "robinhood"
+    && input.market?.marketKind === "robinhood-portal"
+    && input.market.exitRouteVerified
+    && input.exitRouteVerified;
+  if (!trusted && input.market && !verifiedPortalMarket && input.market.liquidityUsd < minimumLiquidityUsd) {
     return reject(asset, false, false, false, Boolean(input.exitRouteVerified), `Token likiditesi ${minimumLiquidityUsd.toFixed(0)} USD kalite eşiğinin altında.`, checks);
   }
-  if (!trusted && input.market) checks.push({
+  if (!trusted && input.market && !verifiedPortalMarket) checks.push({
     label: "Likidite",
     status: minimumLiquidityUsd < input.settings.minimumLiquidityUsd ? "warning" : "passed",
     detail: `${input.market.liquidityUsd.toFixed(0)} USD likidite; uygulanan eşik ${minimumLiquidityUsd.toFixed(0)} USD.`,
+  });
+  if (verifiedPortalMarket) checks.push({
+    label: "Robinhood Portal",
+    status: "warning",
+    detail: "AMM likidite eşiği yerine çift yönlü Portal rotası doğrulandı; pozisyon büyüklüğü azaltıldı.",
   });
 
   const ageMinutes = input.market?.pairCreatedAt ? Math.max(0, (Date.now() - input.market.pairCreatedAt) / 60_000) : Number.POSITIVE_INFINITY;

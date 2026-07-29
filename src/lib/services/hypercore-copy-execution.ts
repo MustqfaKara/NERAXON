@@ -119,6 +119,10 @@ export async function executeHypercoreCopyExecution(wallet: TrackedWallet, fill:
     const openedQuantity = plan.marketType === "spot" ? Number(execution.receivedAmount) : executedQuantity;
     const executionPriceUsd = execution.averagePriceUsd ?? Number(plan.limitPrice);
     const feeUsd = execution.executionFeeUsd ?? estimatedFeeUsd;
+    const costBasisUsd = intent.action === "close" ? consumedCost(ownedLots, String(executedQuantity)) : 0;
+    const closePnlUsd = intent.action === "close" ? hypercoreClosePnl(ownedLots, executedQuantity, executionPriceUsd, intent.side) : 0;
+    const netProceedsUsd = intent.action === "close" ? Math.max(0, costBasisUsd + closePnlUsd - feeUsd) : 0;
+    const realizedPnlUsd = intent.action === "close" ? netProceedsUsd - costBasisUsd : 0;
     store.updateExecutionAttempt(requestId, {
       status: mode === "shadow" ? "simulated" : "confirmed", amountIn: execution.executedAmount, amountOut: execution.receivedAmount,
       expectedAmountOut: plan.size, minimumAmountOut: plan.size, quotedPriceUsd: Number(plan.limitPrice),
@@ -134,6 +138,19 @@ export async function executeHypercoreCopyExecution(wallet: TrackedWallet, fill:
         minimumTradableNotionalUsd: plan.minimumTradableNotionalUsd,
         averageFillPriceUsd: execution.averagePriceUsd ?? null,
         actualExecutionFeeUsd: execution.executionFeeUsd ?? null,
+        tradeValueUsd: plan.notionalUsd,
+        tokenQuantity: intent.action === "open" ? openedQuantity : executedQuantity,
+        marketPriceUsd: plan.referencePriceUsd,
+        liquidityUsd: plan.openInterestUsd,
+        volume24hUsd: plan.volume24hUsd,
+        walletLabel: wallet.label,
+        sourceReference: fill.id,
+        ...(intent.action === "close" ? {
+          costBasisUsd,
+          netProceedsUsd,
+          realizedPnlUsd,
+          realizedPnlPercent: costBasisUsd > 0 ? realizedPnlUsd / costBasisUsd * 100 : 0,
+        } : {}),
       },
       txHash: execution.externalOrderId ? `hyperliquid:${execution.externalOrderId}` : null,
       externalOrderId: execution.externalOrderId,
@@ -152,11 +169,8 @@ export async function executeHypercoreCopyExecution(wallet: TrackedWallet, fill:
       if (mode === "shadow") applyShadowBuy("hyperliquid", entryCostUsd, feeUsd);
       if (consensus?.shouldCopy) store.finishExecutionBuyStage(mode, "hyperliquid", assetKey, consensus.stage, true);
     } else {
-      const costBasisUsd = consumedCost(ownedLots, String(executedQuantity));
-      const pnlUsd = hypercoreClosePnl(ownedLots, executedQuantity, executionPriceUsd, intent.side);
-      const netProceedsUsd = Math.max(0, costBasisUsd + pnlUsd - feeUsd);
       store.reduceExecutionLots(ownedLots, String(executedQuantity), { netProceedsUsd, feesUsd: feeUsd }, 10 ** -plan.sizeDecimals);
-      if (mode === "shadow") applyShadowSell("hyperliquid", netProceedsUsd, netProceedsUsd - costBasisUsd, feeUsd);
+      if (mode === "shadow") applyShadowSell("hyperliquid", netProceedsUsd, realizedPnlUsd, feeUsd);
     }
     store.markExecutionAccounted(requestId);
     if (mode === "live") await reconcileAfterLiveExecution("hyperliquid", requestId);

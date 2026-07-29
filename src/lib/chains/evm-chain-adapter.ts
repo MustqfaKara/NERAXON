@@ -142,15 +142,17 @@ export class EvmChainAdapter implements ChainAdapter {
     onError: (error: Error) => Promise<void>,
     options: ChainWatchOptions = {},
   ) {
+    let active = true;
     let lastBlock = options.resumeFromCursor === null || options.resumeFromCursor === undefined
       ? null
       : BigInt(options.resumeFromCursor);
     let processing = Promise.resolve();
-    return this.client.watchBlockNumber({
+    const stopWatching = this.client.watchBlockNumber({
       emitOnBegin: true,
       pollingInterval: evmPollingIntervalMs(this.id),
       onBlockNumber: async (blockNumber) => {
         processing = processing.then(async () => {
+          if (!active) return;
           if (lastBlock !== null && blockNumber <= lastBlock) return;
           const start = lastBlock === null
             ? blockNumber
@@ -163,6 +165,7 @@ export class EvmChainAdapter implements ChainAdapter {
           await onBlock({ ...health, blockNumber: Number(blockNumber) });
           const replayBatchSize = getEvmReplayBatchSize(this.id);
           for (const range of splitEvmReplayRange(start, blockNumber, replayBatchSize)) {
+            if (!active) return;
             const { fromBlock: cursor, toBlock: end } = range;
             const addresses = trackedAddresses();
             const matches = addresses.size
@@ -175,11 +178,17 @@ export class EvmChainAdapter implements ChainAdapter {
               await new Promise((resolve) => setTimeout(resolve, this.id === "base" ? 75 : 125));
             }
           }
-        }).catch((error) => onError(error instanceof Error ? error : new Error("EVM blok replay hatası.")));
+        }).catch((error) => active ? onError(error instanceof Error ? error : new Error("EVM blok replay hatası.")) : undefined);
         await processing;
       },
-      onError: (error) => void onError(error instanceof Error ? error : new Error("RPC izleme hatası.")),
+      onError: (error) => {
+        if (active) void onError(error instanceof Error ? error : new Error("RPC izleme hatası."));
+      },
     });
+    return () => {
+      active = false;
+      stopWatching();
+    };
   }
 
   private async getTrackedTransactions(from: bigint, to: bigint, addresses: Set<string>) {

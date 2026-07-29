@@ -7,6 +7,8 @@ import { getMarketDataProvider, type MarketSnapshot } from "@/lib/services/marke
 import { inspectContractSecurity, mergeTokenSafety } from "@/lib/services/contract-security-service";
 import { PublicKey } from "@solana/web3.js";
 import { solanaRpc } from "@/lib/solana/helius-client";
+import { getJupiterShieldWarnings } from "@/lib/services/jupiter-api";
+import { evaluateJupiterShieldWarnings } from "@/lib/security/solana-token-security";
 
 const ERC20_METADATA_ABI = [
   { type: "function", name: "name", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
@@ -76,16 +78,17 @@ interface SolanaAsset {
 async function resolveSolanaTokenQuote(tokenAddress: string): Promise<TokenQuote> {
   let address: string;
   try { address = new PublicKey(tokenAddress.trim()).toBase58(); } catch { throw new Error("Geçerli bir Solana token mint adresi girin."); }
-  const [asset, market, gas] = await Promise.all([
+  const [asset, market, gas, shieldWarnings] = await Promise.all([
     solanaRpc<SolanaAsset>("getAsset", { id: address, displayOptions: { showFungible: true } }),
     getMarketDataProvider().getTokenMarket("solana", address),
     estimatePaperGas("solana"),
+    getJupiterShieldWarnings(address),
   ]);
   const decimals = asset.token_info?.decimals ?? 0;
   const supply = Number(asset.token_info?.supply ?? 0) / 10 ** decimals;
   const marketWithCapitalization = { ...market, marketCapUsd: market.marketCapUsd ?? (supply > 0 ? supply * market.priceUsd : null) };
   const baseSafety = evaluateTokenSafety(marketWithCapitalization);
-  const solanaChecks = inspectSolanaAsset(asset);
+  const solanaChecks = mergeSolanaSecurityChecks(inspectSolanaAsset(asset), evaluateJupiterShieldWarnings(shieldWarnings));
   const safety = mergeTokenSafety(baseSafety, solanaChecks);
   return {
     chainId: "solana",
@@ -101,8 +104,11 @@ async function resolveSolanaTokenQuote(tokenAddress: string): Promise<TokenQuote
 }
 
 export async function inspectSolanaTokenSecurity(tokenAddress: string) {
-  const asset = await solanaRpc<SolanaAsset>("getAsset", { id: tokenAddress, displayOptions: { showFungible: true } });
-  return inspectSolanaAsset(asset);
+  const [asset, shieldWarnings] = await Promise.all([
+    solanaRpc<SolanaAsset>("getAsset", { id: tokenAddress, displayOptions: { showFungible: true } }),
+    getJupiterShieldWarnings(tokenAddress),
+  ]);
+  return mergeSolanaSecurityChecks(inspectSolanaAsset(asset), evaluateJupiterShieldWarnings(shieldWarnings));
 }
 
 function inspectSolanaAsset(asset: SolanaAsset): Pick<TokenQuote["safety"], "approved" | "warnings" | "checks"> {
@@ -124,4 +130,15 @@ function inspectSolanaAsset(asset: SolanaAsset): Pick<TokenQuote["safety"], "app
     checks.push({ label: "Mint authority", status: "warning", detail: "Token arzı artırılabilir." });
   } else checks.push({ label: "Mint authority", status: "passed", detail: "Mint authority bulunmuyor." });
   return { approved: true, warnings, checks };
+}
+
+function mergeSolanaSecurityChecks(
+  left: Pick<TokenQuote["safety"], "approved" | "warnings" | "checks">,
+  right: Pick<TokenQuote["safety"], "approved" | "warnings" | "checks">,
+) {
+  return {
+    approved: left.approved && right.approved,
+    warnings: [...left.warnings, ...right.warnings],
+    checks: [...left.checks, ...right.checks],
+  };
 }

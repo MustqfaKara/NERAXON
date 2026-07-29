@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { calculateSolanaSmartWalletScore, isSolanaSmartWalletEligible, solanaSmartWalletRejectionReasons, type SolanaSmartWalletMetrics } from "../src/lib/engine/solana-smart-wallet-score.ts";
+import { calculateSolanaSmartWalletScore, isSolanaSmartWalletEligible, type SolanaSmartWalletMetrics } from "../src/lib/engine/solana-smart-wallet-score.ts";
 
 const strongWallet: SolanaSmartWalletMetrics = {
   trades24h: 12,
   buys24h: 6,
   invested24hUsd: 4_800,
-  invested7dUsd: 18_000,
+  invested7dUsd: 1_800,
   uniqueTokens7d: 9,
   closedTokens7d: 7,
   winRate7d: 71,
@@ -24,7 +24,7 @@ test("istikrarlı ve ölçülü Solana cüzdanı keşfe kabul edilir", () => {
 });
 
 test("aşırı ROI, yoğun işlem ve şüpheli etiket reddedilir", () => {
-  assert.equal(isSolanaSmartWalletEligible({ ...strongWallet, realizedRoi7dPercent: 800 }), false);
+  assert.equal(isSolanaSmartWalletEligible({ ...strongWallet, realizedRoi7dPercent: 1_200 }), false);
   assert.equal(isSolanaSmartWalletEligible({ ...strongWallet, trades24h: 51 }), false);
   assert.equal(isSolanaSmartWalletEligible({ ...strongWallet, suspiciousTagCount: 1 }), false);
 });
@@ -33,9 +33,18 @@ test("24 saatte 50 swap sınırda kabul edilir", () => {
   assert.equal(isSolanaSmartWalletEligible({ ...strongWallet, trades24h: 50 }), true);
 });
 
-test("açık zararı gerçekleşmiş kârı silen cüzdan reddedilir", () => {
-  assert.equal(isSolanaSmartWalletEligible({ ...strongWallet, unrealizedPnl7dUsd: -1_100, totalPnl7dUsd: 1_300 }), false);
-  assert.ok(solanaSmartWalletRejectionReasons({ ...strongWallet, unrealizedPnl7dUsd: -1_100 }).includes("open_drawdown"));
+test("açık düşüş sert filtre yerine risk skorunu azaltır", () => {
+  const openDrawdown = {
+    ...strongWallet,
+    invested7dUsd: 150,
+    unrealizedPnl7dUsd: -2_000,
+    totalPnl7dUsd: 180,
+  };
+  assert.equal(isSolanaSmartWalletEligible(openDrawdown), true);
+  assert.ok(
+    calculateSolanaSmartWalletScore(openDrawdown).score
+    < calculateSolanaSmartWalletScore(strongWallet).score,
+  );
 });
 
 test("iki kapanış ve yüzde 50 kazanma oranı geniş keşif örneklemine kabul edilir", () => {
@@ -45,7 +54,43 @@ test("iki kapanış ve yüzde 50 kazanma oranı geniş keşif örneklemine kabul
 });
 
 test("kâr eşiği ve şüpheli cüzdan engeli geniş örneklemde korunur", () => {
-  assert.equal(isSolanaSmartWalletEligible({ ...strongWallet, realizedPnl7dUsd: 99 }), false);
   assert.equal(isSolanaSmartWalletEligible({ ...strongWallet, totalPnl7dUsd: 99 }), false);
   assert.equal(isSolanaSmartWalletEligible({ ...strongWallet, suspiciousTagCount: 1 }), false);
+});
+
+test("gerçekleşmemiş kârı güçlü ve geçmişi yeterli cüzdan skorla değerlendirilir", () => {
+  const openWinner = {
+    ...strongWallet,
+    invested7dUsd: 300,
+    winRate7d: 45,
+    realizedPnl7dUsd: 40,
+    unrealizedPnl7dUsd: 310,
+    totalPnl7dUsd: 350,
+    realizedRoi7dPercent: 4,
+  };
+  assert.equal(isSolanaSmartWalletEligible(openWinner), true);
+  assert.ok(calculateSolanaSmartWalletScore(openWinner).score >= 60);
+});
+
+test("tek kapanışlı veya düşük kazanma oranlı cüzdan doğrudan silinmez", () => {
+  const limitedEvidence = {
+    ...strongWallet,
+    uniqueTokens7d: 1,
+    closedTokens7d: 1,
+    winRate7d: 35,
+  };
+  assert.equal(isSolanaSmartWalletEligible(limitedEvidence), true);
+  assert.ok(
+    calculateSolanaSmartWalletScore(limitedEvidence).score
+    < calculateSolanaSmartWalletScore(strongWallet).score,
+  );
+});
+
+test("yüksek sermayeyle düşük oransal kâr eden cüzdan reddedilir", () => {
+  const lowMultiple = {
+    ...strongWallet,
+    invested7dUsd: 10_000,
+    totalPnl7dUsd: 2_500,
+  };
+  assert.equal(isSolanaSmartWalletEligible(lowMultiple), false);
 });

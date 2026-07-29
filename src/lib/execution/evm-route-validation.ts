@@ -2,6 +2,12 @@ import { getAddress, isAddress, type Address, type Hex } from "viem";
 
 export const ZERO_EX_ALLOWANCE_HOLDER = getAddress("0x0000000000001fF3684f28c67538d4D072C22734");
 export const LIFI_DIAMOND = getAddress("0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE");
+export const BASE_UNISWAP_V2_FACTORY = getAddress("0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6");
+export const BASE_UNISWAP_V2_ROUTER = getAddress("0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24");
+export const BASE_UNISWAP_V3_FACTORY = getAddress("0x33128a8fC17869897dcE68Ed026d694621f6FDfD");
+export const BASE_UNISWAP_V3_QUOTER = getAddress("0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a");
+export const BASE_UNISWAP_V3_ROUTER = getAddress("0x2626664c2603336E57B271c5C0b26F421741e481");
+export const BASE_WETH = getAddress("0x4200000000000000000000000000000000000006");
 
 const NATIVE_TOKEN_ALIASES = new Set([
   "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
@@ -22,11 +28,31 @@ export function assertTrustedExecutionApi(provider: "0x" | "lifi", baseUrl: stri
 }
 
 export function assertExecutionContractPolicy(input: {
-  provider: "0x" | "lifi";
+  provider: "0x" | "lifi" | "uniswap-v2" | "uniswap-v3";
   sellToken: Address;
   transactionTarget: Address;
   allowanceSpender: Address | null;
 }) {
+  if (input.provider === "uniswap-v3") {
+    if (getAddress(input.transactionTarget) !== BASE_UNISWAP_V3_ROUTER) {
+      throw new Error("Uniswap V3 işlemi resmî Base SwapRouter02 kontratını hedeflemiyor.");
+    }
+    if (!isNativeToken(input.sellToken) && getAddress(input.allowanceSpender ?? input.transactionTarget) !== BASE_UNISWAP_V3_ROUTER) {
+      throw new Error("Uniswap V3 token izni resmî Base SwapRouter02 kontratını hedeflemiyor.");
+    }
+    return;
+  }
+
+  if (input.provider === "uniswap-v2") {
+    if (getAddress(input.transactionTarget) !== BASE_UNISWAP_V2_ROUTER) {
+      throw new Error("Uniswap V2 işlemi resmî Base Router02 kontratını hedeflemiyor.");
+    }
+    if (!isNativeToken(input.sellToken) && getAddress(input.allowanceSpender ?? input.transactionTarget) !== BASE_UNISWAP_V2_ROUTER) {
+      throw new Error("Uniswap V2 token izni resmî Base Router02 kontratını hedeflemiyor.");
+    }
+    return;
+  }
+
   if (input.provider === "lifi") {
     if (getAddress(input.transactionTarget) !== LIFI_DIAMOND) {
       throw new Error("LI.FI işlemi resmî Diamond kontratını hedeflemiyor.");
@@ -70,7 +96,12 @@ export interface LifiQuoteResponse {
 
 export function isZeroExRouteUnavailable(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  return /yürütülebilir likidite bulamadı|no (?:quote|route|liquidity)|insufficient liquidity|liquidity unavailable|token.*not supported|rota simülasyonu başarısız|execution reverted/i.test(message);
+  return /yürütülebilir likidite bulamadı|no (?:quote|route|liquidity)|insufficient liquidity|liquidity unavailable|token.*not supported|swap[_ ]validation[_ ]failed|rota simülasyonu başarısız|execution reverted/i.test(message);
+}
+
+export function isLifiRouteUnavailable(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no (?:quote|route|liquidity)|route not found|insufficient liquidity|token.*(?:invalid|not supported|deny ?list)|invalid or in deny list|liquidity unavailable|lifi rota simülasyonu başarısız:.*(?:execution reverted|reverted for an unknown reason)/is.test(message);
 }
 
 export function validateLifiQuotePayload(input: {

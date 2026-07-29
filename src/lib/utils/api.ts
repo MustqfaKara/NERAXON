@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
+import { errorMessage } from "@/lib/utils/error-message";
 
 export function apiError(error: unknown, status = 400) {
-  const message = error instanceof Error ? error.message : "Beklenmeyen bir hata oluştu.";
-  return NextResponse.json({ error: message }, { status });
+  return NextResponse.json({ error: errorMessage(error) }, { status });
 }

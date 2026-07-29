@@ -1,5 +1,6 @@
 import type { DiscoveryGainerToken, DiscoveryTokenPerformance, WalletDiscoveryCandidate, WalletDiscoveryScan } from "@/lib/domain/types";
 import { calculateDiscoveryScore } from "@/lib/engine/discovery-scoring";
+import { calculateDiscoveryPnlPercent, isDiscoveryReturnEligible } from "@/lib/engine/discovery-pnl";
 import { getHypercoreLeaderboard, getHypercoreMarkets, getHypercoreUserFills, type HypercoreLeaderboardRow, type HypercoreMarket } from "@/lib/services/hypercore-api";
 
 const MIN_DAILY_PNL_USD = 100;
@@ -98,13 +99,15 @@ async function enrichCandidate(row: HypercoreLeaderboardRow, markets: HypercoreM
   const boughtUsd = gainerTokens.reduce((sum, token) => sum + token.boughtUsd, 0);
   const soldUsd = gainerTokens.reduce((sum, token) => sum + token.soldUsd, 0);
   if (boughtUsd > MAX_DAILY_BOUGHT_USD || soldUsd > MAX_DAILY_VOLUME_USD) return null;
+  const netPnlPercent = calculateDiscoveryPnlPercent(boughtUsd, row.pnl24hUsd);
+  if (!isDiscoveryReturnEligible(boughtUsd, row.pnl24hUsd)) return null;
   const scoring = calculateDiscoveryScore({
     swapCount: fills.length,
     buyCount,
     sellCount,
     uniqueTokenCount: gainerTokens.length,
     ageMinutes: Math.max(0, (Date.now() - Math.max(...fills.map((fill) => fill.timestamp))) / 60_000),
-    estimatedPnlPercent: row.roi24hPercent,
+    estimatedPnlPercent: netPnlPercent,
     boughtUsd: Math.max(MIN_DAILY_VOLUME_USD, Math.min(boughtUsd, MAX_DAILY_VOLUME_USD)),
     estimatedPnlUsd: row.pnl24hUsd,
   });
@@ -121,7 +124,7 @@ async function enrichCandidate(row: HypercoreLeaderboardRow, markets: HypercoreM
     soldUsd,
     currentValueUsd: row.accountValueUsd,
     estimatedPnlUsd: row.pnl24hUsd,
-    estimatedPnlPercent: row.roi24hPercent,
+    estimatedPnlPercent: netPnlPercent,
     gasCostUsd: gainerTokens.reduce((sum, token) => sum + token.gasCostUsd, 0),
     gainerTokens,
     lastActiveAt: new Date(Math.max(...fills.map((fill) => fill.timestamp))).toISOString(),

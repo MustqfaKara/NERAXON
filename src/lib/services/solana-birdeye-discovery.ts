@@ -3,12 +3,10 @@ import type { DiscoveryGainerToken, DiscoveryTokenPerformance, WalletDiscoveryCa
 import { isStablecoinAsset } from "@/lib/engine/stablecoin-filter";
 import { calculateSolanaSmartWalletScore, solanaSmartWalletHistoryRejectionReasons, solanaSmartWalletRejectionReasons, type SolanaSmartWalletMetrics } from "@/lib/engine/solana-smart-wallet-score";
 import {
-  getBirdeyeGlobalTraders,
   getBirdeyeSolanaTokens,
   getBirdeyeTokenTopTraders,
   getBirdeyeWalletSummary,
   getBirdeyeWalletTokenDetails,
-  type BirdeyeGlobalTrader,
   type BirdeyeTokenListItem,
   type BirdeyeTokenTrader,
   type BirdeyeWalletTokenPnl,
@@ -17,17 +15,17 @@ import { getMarketDataProvider } from "@/lib/services/market-data-provider";
 import { solanaRpc } from "@/lib/solana/helius-client";
 
 const TOP_GAINER_LIMIT = 10;
-const TOP_GAINER_CANDIDATE_LIMIT = 20;
-const MAX_SEED_WALLETS = 30;
+const TOP_GAINER_CANDIDATE_LIMIT = 24;
+const MAX_SEED_WALLETS = 48;
+const TARGET_CANDIDATES = 12;
 const MAX_CANDIDATES = 30;
-const MIN_DISCOVERY_SCORE = 65;
+const MIN_DISCOVERY_SCORE = 60;
 const SUSPICIOUS_TAGS = new Set(["bundler", "sniper", "insider", "dev"]);
 
 interface WalletSeed {
   address: string;
   tags: Set<string>;
   tokenTraders: Map<string, BirdeyeTokenTrader>;
-  global: BirdeyeGlobalTrader | null;
 }
 
 interface SignatureInfo { signature?: string; blockTime?: number | null; err?: unknown }
@@ -63,11 +61,6 @@ export async function scanBirdeyeSolanaWallets(): Promise<WalletDiscoveryScan> {
 
   const rejectionReasons: Record<string, number> = {};
   let providerErrorCount = 0;
-  const globalTradersPromise = getBirdeyeGlobalTraders().catch((error) => {
-    providerErrorCount += 1;
-    increment(rejectionReasons, `provider_${providerErrorReason(error)}`);
-    return [];
-  });
   const tokenTraderGroupsPromise = Promise.all(gainerCandidates.map(async (token) => {
     try {
       return { token, traders: await getBirdeyeTokenTopTraders(token.address) };
@@ -77,13 +70,13 @@ export async function scanBirdeyeSolanaWallets(): Promise<WalletDiscoveryScan> {
       return { token, traders: [] };
     }
   }));
-  const [allTokenTraderGroups, globalTraders] = await Promise.all([tokenTraderGroupsPromise, globalTradersPromise]);
+  const allTokenTraderGroups = await tokenTraderGroupsPromise;
   const tokenTraderGroups = allTokenTraderGroups.filter((group) => group.traders.some(isUsableTokenTrader));
   const topGainers = [...gainerCandidates]
     .sort((left, right) => right.priceChange24hPercent - left.priceChange24hPercent)
     .slice(0, TOP_GAINER_LIMIT);
   const candidateGainers = tokenTraderGroups.map((group) => group.token);
-  const seeds = buildSeeds(tokenTraderGroups, globalTraders);
+  const seeds = buildSeeds(tokenTraderGroups);
   const validationSeeds = selectDiverseSeeds(seeds, MAX_SEED_WALLETS);
   const candidates: WalletDiscoveryCandidate[] = [];
   let tokenLinkedWallets = 0;
@@ -188,7 +181,7 @@ export async function scanBirdeyeSolanaWallets(): Promise<WalletDiscoveryScan> {
           dataSource: "birdeye",
         },
       });
-      if (candidates.length >= MAX_CANDIDATES) break;
+      if (candidates.length >= TARGET_CANDIDATES || candidates.length >= MAX_CANDIDATES) break;
     } catch (error) {
       providerErrorCount += 1;
       increment(rejectionReasons, `provider_${providerErrorReason(error)}`);
@@ -233,13 +226,11 @@ function selectTokenCandidates(tokens: BirdeyeTokenListItem[]) {
 }
 
 function selectDiverseSeeds(seeds: WalletSeed[], limit: number) {
-  const globalReserve = Math.min(4, seeds.filter((seed) => seed.tokenTraders.size === 0).length);
-  const tokenTarget = limit - globalReserve;
   const remaining = seeds.filter((seed) => seed.tokenTraders.size > 0);
   const selected: WalletSeed[] = [];
   const tokenUsage = new Map<string, number>();
 
-  while (remaining.length && selected.length < tokenTarget) {
+  while (remaining.length && selected.length < limit) {
     remaining.sort((left, right) => {
       const leftUsage = averageTokenUsage(left, tokenUsage);
       const rightUsage = averageTokenUsage(right, tokenUsage);
@@ -253,11 +244,7 @@ function selectDiverseSeeds(seeds: WalletSeed[], limit: number) {
     }
   }
 
-  const globalSeeds = seeds
-    .filter((seed) => seed.tokenTraders.size === 0)
-    .sort((left, right) => seedPriority(right) - seedPriority(left))
-    .slice(0, limit - selected.length);
-  return [...selected, ...globalSeeds];
+  return selected;
 }
 
 function averageTokenUsage(seed: WalletSeed, usage: Map<string, number>) {
@@ -267,7 +254,6 @@ function averageTokenUsage(seed: WalletSeed, usage: Map<string, number>) {
 
 function buildSeeds(
   groups: Array<{ token: DiscoveryGainerToken; traders: BirdeyeTokenTrader[] }>,
-  globalTraders: BirdeyeGlobalTrader[],
 ) {
   const seeds = new Map<string, WalletSeed>();
   const blockedAddresses = new Set<string>();
@@ -288,19 +274,8 @@ function buildSeeds(
       seeds.set(trader.owner, seed);
     }
   }
-  const tokenSeedAddresses = new Set(seeds.keys());
-  for (const trader of globalTraders) {
-    if (!isValidAddress(trader.address) || tokenSeedAddresses.has(trader.address) || blockedAddresses.has(trader.address)) continue;
-    const averageTrade = trader.volume / Math.max(1, trader.trade_count);
-    if (trader.volume < 500 || trader.volume > 250_000 || trader.trade_count < 5 || trader.trade_count > 245) continue;
-    if (averageTrade < 100 || averageTrade > 20_000 || trader.pnl < 100 || trader.realized_pnl < 100) continue;
-    const seed = createSeed(trader.address);
-    seed.global = trader;
-    seeds.set(trader.address, seed);
-  }
   return [...seeds.values()].sort((left, right) => {
-    const tokenPriority = Number(right.tokenTraders.size > 0) - Number(left.tokenTraders.size > 0);
-    return tokenPriority || seedPriority(right) - seedPriority(left);
+    return seedPriority(right) - seedPriority(left);
   });
 }
 
@@ -308,7 +283,7 @@ function seedPriority(seed: WalletSeed) {
   const tokenScore = [...seed.tokenTraders.values()].reduce((total, trader) => (
     total + Math.max(0, trader.realizedPnl) + Math.max(0, trader.totalPnl) * 0.35 + Math.min(20_000, trader.volumeBuyUSD) * 0.01
   ), 0);
-  return seed.tokenTraders.size * 500 + tokenScore + Math.max(0, seed.global?.pnl ?? 0);
+  return seed.tokenTraders.size * 500 + tokenScore;
 }
 
 function isUsableTokenTrader(trader: BirdeyeTokenTrader) {
@@ -357,7 +332,7 @@ function performanceFromDetail(detail: BirdeyeWalletTokenPnl, topGainers: Discov
 }
 
 function createSeed(address: string): WalletSeed {
-  return { address, tags: new Set(), tokenTraders: new Map(), global: null };
+  return { address, tags: new Set(), tokenTraders: new Map() };
 }
 
 function normalizePercent(value: number) {

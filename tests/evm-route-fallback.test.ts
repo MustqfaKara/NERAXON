@@ -4,6 +4,9 @@ import { getAddress } from "viem";
 import {
   assertExecutionContractPolicy,
   assertTrustedExecutionApi,
+  BASE_UNISWAP_V2_ROUTER,
+  BASE_UNISWAP_V3_ROUTER,
+  isLifiRouteUnavailable,
   isZeroExRouteUnavailable,
   LIFI_DIAMOND,
   validateLifiQuotePayload,
@@ -16,8 +19,16 @@ const buyToken = getAddress("0x0000000000000000000000000000000000000002");
 
 test("yalnızca rota bulunamaması LI.FI fallback açar", () => {
   assert.equal(isZeroExRouteUnavailable(new Error("0x bu token için yürütülebilir likidite bulamadı.")), true);
+  assert.equal(isZeroExRouteUnavailable(new Error("0x quote alınamadı (400): SWAP_VALIDATION_FAILED · Swap validation failed")), true);
   assert.equal(isZeroExRouteUnavailable(new Error("0x quote alınamadı (451): legal restriction")), false);
   assert.equal(isZeroExRouteUnavailable(new Error("0x quote miktarları güvenlik doğrulamasından geçmedi.")), false);
+});
+
+test("LI.FI denylist cevabı yalnızca doğrulanmış DEX fallback'ini açar", () => {
+  assert.equal(isLifiRouteUnavailable(new Error("LI.FI quote alınamadı (400): Token 8453-0xabc is invalid or in deny list.")), true);
+  assert.equal(isLifiRouteUnavailable(new Error("lifi rota simülasyonu başarısız: Execution reverted for an unknown reason.")), true);
+  assert.equal(isLifiRouteUnavailable(new Error("LI.FI quote zincir doğrulamasından geçmedi.")), false);
+  assert.equal(isLifiRouteUnavailable(new Error("LI.FI işlemi resmî Diamond kontratını hedeflemiyor.")), false);
 });
 
 test("LI.FI quote hesap, zincir, token ve native değeri doğrulanır", () => {
@@ -75,4 +86,34 @@ test("LI.FI yalnızca resmî Diamond hedefini kabul eder", () => {
     transactionTarget: getAddress("0x0000000000000000000000000000000000000099"),
     allowanceSpender: null,
   }), /Diamond/i);
+});
+
+test("Uniswap V2 fallback yalnızca resmî Base Router02 hedefini kabul eder", () => {
+  assert.doesNotThrow(() => assertExecutionContractPolicy({
+    provider: "uniswap-v2",
+    sellToken: buyToken,
+    transactionTarget: BASE_UNISWAP_V2_ROUTER,
+    allowanceSpender: BASE_UNISWAP_V2_ROUTER,
+  }));
+  assert.throws(() => assertExecutionContractPolicy({
+    provider: "uniswap-v2",
+    sellToken: buyToken,
+    transactionTarget: getAddress("0x0000000000000000000000000000000000000099"),
+    allowanceSpender: BASE_UNISWAP_V2_ROUTER,
+  }), /Router02/i);
+});
+
+test("Uniswap V3 fallback yalnızca resmî Base SwapRouter02 hedefini kabul eder", () => {
+  assert.doesNotThrow(() => assertExecutionContractPolicy({
+    provider: "uniswap-v3",
+    sellToken: nativeToken,
+    transactionTarget: BASE_UNISWAP_V3_ROUTER,
+    allowanceSpender: null,
+  }));
+  assert.throws(() => assertExecutionContractPolicy({
+    provider: "uniswap-v3",
+    sellToken: nativeToken,
+    transactionTarget: getAddress("0x0000000000000000000000000000000000000099"),
+    allowanceSpender: null,
+  }), /SwapRouter02/i);
 });

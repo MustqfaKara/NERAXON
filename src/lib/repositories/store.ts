@@ -5,8 +5,8 @@ import { calculateWalletScore } from "@/lib/engine/wallet-scoring";
 import { calculateHypercoreWalletCopyPnl, calculateWalletCopyPnl, type WalletCopyPnlLot } from "@/lib/engine/wallet-copy-pnl";
 import { executionLotNetPnl } from "@/lib/engine/execution-wallet-performance";
 import { canTriggerNextBuy } from "@/lib/engine/copy-buy-consensus";
-import { evaluateWalletActivityLimit } from "@/lib/engine/wallet-activity-limit";
-import { parseTrackedChainIds, walletTracksChain } from "@/lib/engine/wallet-network-scope";
+import { evaluateWalletActivityLimit, walletActivityLimitsFor } from "@/lib/engine/wallet-activity-limit";
+import { parseTrackedChainIds, walletTracksEffectiveChain } from "@/lib/engine/wallet-network-scope";
 import { mapChain, mapEvent, mapHypercorePosition, mapHypercoreTrade, mapPosition, mapPositionLot, mapTrade, mapWallet } from "@/lib/repositories/mappers";
 import type {
   AuditEvent,
@@ -377,11 +377,15 @@ export const store = {
   },
 
   listActiveWalletAddresses(chainId: ChainId): string[] {
-    const rows = getDatabase().prepare("SELECT address, tracked_chain_ids FROM wallets WHERE state != 'paused'").all() as Array<{ address: string; tracked_chain_ids: string }>;
+    const rows = getDatabase().prepare("SELECT address, is_favorite, tracked_chain_ids FROM wallets WHERE state != 'paused'").all() as Array<{ address: string; is_favorite: number; tracked_chain_ids: string }>;
     return rows
       .filter((row) => {
         try {
-          return walletTracksChain(parseTrackedChainIds(row.tracked_chain_ids), chainId);
+          return walletTracksEffectiveChain({
+            address: row.address,
+            isFavorite: Boolean(row.is_favorite),
+            trackedChainIds: parseTrackedChainIds(row.tracked_chain_ids),
+          }, chainId);
         } catch {
           return false;
         }
@@ -431,7 +435,7 @@ export const store = {
   findWalletByAddress(address: string, chainId?: ChainId): TrackedWallet | null {
     return this.listWallets().find((wallet) =>
       (chainId === "solana" ? wallet.address === address : wallet.address === address.toLowerCase())
-      && (!chainId || walletTracksChain(wallet.trackedChainIds, chainId))
+      && (!chainId || walletTracksEffectiveChain(wallet, chainId))
     ) ?? null;
   },
 
@@ -536,13 +540,13 @@ export const store = {
       WHERE wallet_id = ? AND chain_id = ? AND observed_at >= ?
     `).get(hourStart, walletId, chainId, dayStart) as { hour_count: number | null; day_count: number };
     const settings = this.getRiskSettings();
+    const limits = walletActivityLimitsFor(chainId, settings);
     const swapsLastHour = Number(counts.hour_count ?? 0);
     const swapsLast24Hours = Number(counts.day_count ?? 0);
     const decision = evaluateWalletActivityLimit({
       swapsLastHour,
       swapsLast24Hours,
-      maxSwapsPerHour: settings.maxWalletSwapsPerHour ?? 8,
-      maxSwapsPer24Hours: settings.maxWalletSwapsPer24Hours ?? 50,
+      ...limits,
     });
     const wallet = this.getWallet(walletId);
     const newlyPaused = Boolean(decision.exceeded && wallet && wallet.state !== "paused");
@@ -574,11 +578,11 @@ export const store = {
       for (const counts of networkCounts) {
         const swapsLastHour = Number(counts.hour_count ?? 0);
         const swapsLast24Hours = Number(counts.day_count ?? 0);
+        const limits = walletActivityLimitsFor(counts.chain_id, settings);
         const decision = evaluateWalletActivityLimit({
           swapsLastHour,
           swapsLast24Hours,
-          maxSwapsPerHour: settings.maxWalletSwapsPerHour ?? 8,
-          maxSwapsPer24Hours: settings.maxWalletSwapsPer24Hours ?? 50,
+          ...limits,
         });
         if (!decision.exceeded || !decision.reason) continue;
         const reason = `${counts.chain_id}: ${decision.reason}`;
@@ -752,8 +756,23 @@ export const store = {
     const wallet = this.getWallet(walletId);
     if (!wallet) throw new Error("Cüzdan bulunamadı.");
     const updatedAt = new Date().toISOString();
-    getDatabase().prepare("UPDATE wallets SET is_favorite = ?, updated_at = ? WHERE id = ?").run(isFavorite ? 1 : 0, updatedAt, walletId);
-    return { ...wallet, isFavorite, updatedAt };
+    const state = isFavorite ? "active" : wallet.state;
+    const pauseReason = isFavorite ? null : wallet.pauseReason;
+    const database = getDatabase();
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database.prepare(`
+        UPDATE wallets
+        SET is_favorite = ?, state = ?, pause_reason = ?, updated_at = ?
+        WHERE id = ?
+      `).run(isFavorite ? 1 : 0, state, pauseReason, updatedAt, walletId);
+      if (isFavorite) database.prepare("DELETE FROM wallet_swap_activity WHERE wallet_id = ?").run(walletId);
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+    return { ...wallet, isFavorite, state, pauseReason, updatedAt };
   },
 
   deleteWallet(walletId: string) {
@@ -1045,16 +1064,17 @@ export const store = {
   },
 
   insertExecutionLot(lot: Omit<ExecutionLot,
-    "initialAmount" | "assetSymbol" | "assetDecimals" | "entryPriceUsd" | "currentPriceUsd" |
+    "initialAmount" | "assetSymbol" | "pairAddress" | "assetDecimals" | "entryPriceUsd" | "currentPriceUsd" |
     "entryCostUsd" | "realizedPnlUsd" | "feesUsd" | "leverage"
   > & Partial<Pick<ExecutionLot,
-    "initialAmount" | "assetSymbol" | "assetDecimals" | "entryPriceUsd" | "currentPriceUsd" |
+    "initialAmount" | "assetSymbol" | "pairAddress" | "assetDecimals" | "entryPriceUsd" | "currentPriceUsd" |
     "entryCostUsd" | "realizedPnlUsd" | "feesUsd" | "leverage"
   >>) {
     const complete: ExecutionLot = {
       ...lot,
       initialAmount: lot.initialAmount ?? lot.amount,
       assetSymbol: lot.assetSymbol ?? "",
+      pairAddress: lot.pairAddress ?? null,
       assetDecimals: lot.assetDecimals ?? 0,
       entryPriceUsd: lot.entryPriceUsd ?? 0,
       currentPriceUsd: lot.currentPriceUsd ?? lot.entryPriceUsd ?? 0,
@@ -1066,14 +1086,14 @@ export const store = {
     getDatabase().prepare(`
       INSERT INTO execution_lots
       (id, integration_id, mode, asset_key, wallet_id, source, market_type, position_side,
-       amount, initial_amount, amount_format, asset_symbol, asset_decimals, entry_price_usd,
+       amount, initial_amount, amount_format, asset_symbol, pair_address, asset_decimals, entry_price_usd,
        current_price_usd, entry_cost_usd, realized_pnl_usd, fees_usd, leverage,
        entry_reference, status, opened_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       complete.id, complete.integrationId, complete.mode, normalizeExecutionAssetKey(complete.integrationId, complete.assetKey), complete.walletId, complete.source,
       complete.marketType, complete.positionSide, complete.amount, complete.initialAmount, complete.amountFormat,
-      complete.assetSymbol, complete.assetDecimals, complete.entryPriceUsd, complete.currentPriceUsd, complete.entryCostUsd,
+      complete.assetSymbol, complete.pairAddress ?? null, complete.assetDecimals, complete.entryPriceUsd, complete.currentPriceUsd, complete.entryCostUsd,
       complete.realizedPnlUsd, complete.feesUsd, complete.leverage, complete.entryReference, complete.status, complete.openedAt, complete.updatedAt,
     );
     if (complete.mode === "live") this.setReconciliation({ integrationId: complete.integrationId, status: "pending", details: "Yeni live lot sonrası mutabakat yenilenmeli.", checkedAt: null });
@@ -1111,9 +1131,12 @@ export const store = {
     if (lots[0].mode === "live") this.setReconciliation({ integrationId: lots[0].integrationId, status: "pending", details: "Live lot azaltıldı; mutabakat yenilenmeli.", checkedAt: null });
   },
 
-  updateExecutionLotMarket(id: string, currentPriceUsd: number) {
-    getDatabase().prepare("UPDATE execution_lots SET current_price_usd = ?, updated_at = ? WHERE id = ?")
-      .run(Math.max(0, currentPriceUsd), new Date().toISOString(), id);
+  updateExecutionLotMarket(id: string, currentPriceUsd: number, pairAddress?: string | null) {
+    getDatabase().prepare(`
+      UPDATE execution_lots
+      SET current_price_usd = ?, pair_address = COALESCE(?, pair_address), updated_at = ?
+      WHERE id = ?
+    `).run(Math.max(0, currentPriceUsd), pairAddress ?? null, new Date().toISOString(), id);
   },
 
   expirePreparingExecutionAttempts(maxAgeMinutes = 15) {
@@ -1242,6 +1265,26 @@ export const store = {
     return Number(row.equity_usd);
   },
 
+  getLiveDailyBaselineRecord(integrationId: ChainId, date: string) {
+    const row = getDatabase().prepare(`
+      SELECT equity_usd, created_at
+      FROM live_daily_baselines
+      WHERE integration_id = ? AND date = ?
+    `).get(integrationId, date) as { equity_usd: number; created_at: string } | undefined;
+    return row ? { equityUsd: Number(row.equity_usd), createdAt: row.created_at } : null;
+  },
+
+  getLiveInitialBaselineRecord(integrationId: ChainId) {
+    const row = getDatabase().prepare(`
+      SELECT equity_usd, created_at
+      FROM live_daily_baselines
+      WHERE integration_id = ?
+      ORDER BY date ASC, created_at ASC
+      LIMIT 1
+    `).get(integrationId) as { equity_usd: number; created_at: string } | undefined;
+    return row ? { equityUsd: Number(row.equity_usd), createdAt: row.created_at } : null;
+  },
+
   getLiveInitialBaseline(integrationId: ChainId, fallbackEquityUsd: number) {
     const row = getDatabase().prepare(`
       SELECT equity_usd
@@ -1251,6 +1294,27 @@ export const store = {
       LIMIT 1
     `).get(integrationId) as { equity_usd: number } | undefined;
     return row ? Number(row.equity_usd) : fallbackEquityUsd;
+  },
+
+  initializeLiveFundingBaselines(integrationId: ChainId, date: string, equityUsd: number) {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database.prepare(`
+        INSERT OR IGNORE INTO live_daily_baselines (integration_id, date, equity_usd, created_at)
+        VALUES (?, ?, ?, ?)
+      `).run(integrationId, date, equityUsd, now);
+      database.prepare(`
+        UPDATE live_daily_baselines
+        SET equity_usd = ?
+        WHERE integration_id = ? AND ABS(equity_usd) <= 0.01
+      `).run(equityUsd, integrationId);
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
   },
 
   listPositionLots(chainId?: ChainId, tokenAddress?: string, walletId?: string | null): PositionLot[] {
@@ -1489,6 +1553,11 @@ export const store = {
     return row ? Number(row.cursor) : null;
   },
 
+  getChainCursorState(chainId: ChainId): { cursor: number; updatedAt: string } | null {
+    const row = getDatabase().prepare("SELECT cursor, updated_at FROM chain_cursors WHERE chain_id = ?").get(chainId) as { cursor: number; updated_at: string } | undefined;
+    return row ? { cursor: Number(row.cursor), updatedAt: row.updated_at } : null;
+  },
+
   setChainCursor(chainId: ChainId, cursor: number) {
     if (!Number.isSafeInteger(cursor) || cursor < 0) return;
     getDatabase().prepare(`
@@ -1682,6 +1751,7 @@ function mapExecutionLot(row: Record<string, unknown>): ExecutionLot {
     initialAmount: row.initial_amount as string,
     amountFormat: row.amount_format as ExecutionLot["amountFormat"],
     assetSymbol: row.asset_symbol as string,
+    pairAddress: row.pair_address ? String(row.pair_address) : null,
     assetDecimals: Number(row.asset_decimals),
     entryPriceUsd: Number(row.entry_price_usd),
     currentPriceUsd: Number(row.current_price_usd),
